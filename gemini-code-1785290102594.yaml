@@ -1,0 +1,27 @@
+name: Bizinfo B2G Daily Email Bot
+
+on:
+  schedule:
+    # 매일 아침 8시 30분 (한국 시간 기준 KST) 실행
+    - cron: '30 23 * * *'
+  workflow_dispatch: # 깃허브 웹에서 '지금 즉시 실행'도 가능하도록 설정
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 코드 불러오기
+        uses: actions/checkout@v3
+
+      - name: 파이썬 환경 세팅
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: 필요 라이브러리 설치
+        run: |
+          pip install requests pdfplumber urllib3
+
+      - name: 기업마당 자동화 봇 실행
+        run: |
+          python bizinfo_bot.py
