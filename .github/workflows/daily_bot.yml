@@ -1,0 +1,32 @@
+name: Bizinfo B2G Bot
+
+on:
+  schedule:
+    - cron: '0 21 * * *' # 매일 새벽 6시 (KST 기준)
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      # 🚨 바로 이 부분이 있는지 꼭 확인해주세요!
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 google-generativeai
+
+      - name: Run bot script
+        run: python bizinfo_bot.py
+        env:
+          MAIL_USER: ${{ secrets.MAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          MAIL_RECEIVER: ${{ secrets.MAIL_RECEIVER }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
