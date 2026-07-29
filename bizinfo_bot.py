@@ -5,6 +5,7 @@ import urllib.request
 import json
 import ssl
 import smtplib
+import time
 import requests
 from bs4 import BeautifulSoup
 from email.mime.multipart import MIMEMultipart
@@ -34,41 +35,39 @@ def fetch_bizinfo_notices():
         }
     )
 
-    try:
-        print("⏳ [수집 시작] 표준 보안 연결로 기업마당 API 호출 중...")
-        with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
-            if response.status == 200:
-                res_body = response.read().decode('utf-8')
-                data = json.loads(res_body)
-                items = data.get("jsonArray") or data.get("item") or data.get("items") or []
-                print(f"🎯 [수집 성공] 총 {len(items)}건의 공고를 가져왔습니다.")
-                return items
-            else:
-                print(f"❌ [API 응답 오류]: 상태 코드 {response.status}")
-    except Exception as e:
-        print(f"❌ [연결 에러]: {str(e)}")
+    # 3번까지 재시도하는 로직 추가 (타임아웃 방어)
+    for attempt in range(3):
+        try:
+            print(f"⏳ [수집 시도 {attempt+1}/3] 기업마당 API 호출 중...")
+            with urllib.request.urlopen(req, context=ctx, timeout=60) as response:
+                if response.status == 200:
+                    res_body = response.read().decode('utf-8')
+                    data = json.loads(res_body)
+                    items = data.get("jsonArray") or data.get("item") or data.get("items") or []
+                    print(f"🎯 [수집 성공] 총 {len(items)}건의 공고를 가져왔습니다.")
+                    return items
+        except Exception as e:
+            print(f"⚠️ [연결 지연/에러] 시도 {attempt+1}회 실패: {str(e)}")
+            time.sleep(3) # 3초 대기 후 재시도
+            
+    print("❌ [최종 실패] API 서버 응답 시간이 초과되었습니다.")
     return []
 
 def crawl_detail_page(url):
-    """상세 페이지에 접속하여 본문 텍스트를 긁어오고 핵심 정보를 정규식으로 파싱합니다."""
     if not url or url == "#":
         return "상세 링크 없음", "상세 내용 참조"
     
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        res = requests.get(url, headers=headers, timeout=10)
+        res = requests.get(url, headers=headers, timeout=15)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
-            # 페이지 전체 텍스트 추출
             full_text = soup.get_text(separator=" ", strip=True)
-            
-            # 1. 모집규모 파싱 시도 (예: "모집규모 : 5업체 내외" 또는 주변 텍스트)
             scale_match = re.search(r"(모집규모|지원규모)[:\s]+([^,\n\.]{2,25})", full_text)
             scale_text = scale_match.group(0) if scale_match else "공고문 참조"
-            
             return full_text, scale_text
     except Exception as e:
-        print(f"⚠️ 상세 페이지 크롤링 실패 ({url}): {str(e)}")
+        print(f"⚠️ 상세 페이지 크롤링 경고 ({url}): {str(e)}")
     
     return "", "공고문 참조"
 
@@ -84,9 +83,7 @@ def analyze_and_build_html(items):
         ref_name = item.get("refrncNm", "")
         original_method = item.get("reqstMthDscd") or item.get("reqstMthCn") or item.get("reqstMthPapersCn") or item.get("rcivMth") or "공고문 참조"
         
-        # 상세 페이지 크롤링 및 본문 확보
         detail_text, parsed_scale = crawl_detail_page(link)
-        
         full_text = f"{summary} {ref_name} {original_method} {detail_text}"
 
         target_type = "👤 개인" if ("개인" in full_text and "기업" not in full_text) else "🏢 기업"
@@ -135,7 +132,7 @@ def analyze_and_build_html(items):
     <head><meta charset="utf-8"></head>
     <body style="font-family:'Malgun Gothic', sans-serif; color:#333;">
         <div style="max-width:1500px; margin:0 auto; padding:20px;">
-            <h2 style="color:#004aad;">📊 B2G 지원사업 실시간 수집 및 원클릭 제안 리포트 (상세 파싱 적용)</h2>
+            <h2 style="color:#004aad;">📊 B2G 지원사업 실시간 수집 및 원클릭 제안 리포트</h2>
             <p>기업마당 API 및 상세 페이지 분석 결과, 총 {len(items)}건의 공고가 처리되었습니다.</p>
             <table style="width:100%; border-collapse:collapse; margin-top:15px;">
                 <thead>
