@@ -18,19 +18,21 @@ EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 PHONE_PATTERN = re.compile(r"0\d{1,2}-\d{3,4}-\d{4}")
 
 def fetch_bizinfo_notices():
-    req_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=10&pageIndex=1"
+    # 💡 문제가 되었던 pageIndex를 완전히 제거하고 인증키와 검색 개수만 깔끔하게 요청합니다.
+    params = {
+        "crtfcKey": CRTFC_KEY,
+        "dataType": "json",
+        "searchCnt": "50"
+    }
     
     headers = {
-        "Host": "www.bizinfo.go.kr",
-        "Connection": "keep-alive",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     }
     
     try:
-        print("⏳ [진단 1단계] 기업마당 API 서버로 접속을 시도합니다...")
+        print("⏳ [진단 1단계] pageIndex를 제외하고 API 서버를 호출합니다...")
         session = requests.Session()
-        resp = session.get(req_url, headers=headers, timeout=25, verify=False)
+        resp = session.get(BIZINFO_API_URL, params=params, headers=headers, timeout=25, verify=False)
         print(f"✅ [진단 통과] 서버 응답 상태 코드: {resp.status_code}")
         
         if resp.status_code == 200:
@@ -44,16 +46,16 @@ def fetch_bizinfo_notices():
                 print(f"🎯 [파싱 성공] 총 {len(items)}건의 공고를 불러왔습니다.")
                 return items
             except Exception as json_e:
-                print(f"❌ [데이터 형식 에러]: 서버가 JSON이 아닌 다른 형태의 응답을 보냈습니다. 에러 내용: {json_e}")
+                print(f"❌ [데이터 형식 에러]: {json_e}")
                 print(f"📦 [서버 원본 응답 내용 일부]: {resp.text[:300]}")
                 return []
                 
     except requests.exceptions.Timeout:
-        print("❌ [에러 원인: 타임아웃] 기업마당 서버 응답 시간이 너무 오래 걸려 연결이 끊겼습니다.")
+        print("❌ [에러 원인: 타임아웃] 서버 응답 지연")
     except requests.exceptions.ConnectionError:
-        print("❌ [에러 원인: 연결 거부/차단] 깃허브 IP가 기업마당 방화벽에 의해 차단되었거나 네트워크가 불안정합니다.")
+        print("❌ [에러 원인: 연결 차단] 깃허브 IP 차단 또는 네트워크 불안정")
     except Exception as e:
-        print(f"❌ [알 수 없는 에러 발생]: {str(e)}")
+        print(f"❌ [에러 발생]: {str(e)}")
         
     return []
 
@@ -64,7 +66,6 @@ def process_and_analyze(items):
         summary = item.get("bsnsSumryCn") or item.get("description", "")
         target_nm = item.get("trgetNm", "")
         org_name = item.get("jrsdInsttNm") or item.get("author", "-")
-        exec_org = item.get("excInsttNm", "-")
         link = item.get("pblancUrl") or item.get("link", "#")
         contact_info = item.get("refrncNm", "")
         papers_info = item.get("reqstMthPapersCn", "")
@@ -89,7 +90,7 @@ def process_and_analyze(items):
 
 def print_screen_report(results):
     if not results:
-        print("\n⚠️ 수집된 공고가 없어 화면 출력을 건너뜁니다.")
+        print("\n⚠️ 수집된 공고가 없습니다.")
         return
 
     print("\n" + "="*80)
@@ -112,4 +113,4 @@ if __name__ == "__main__":
         analyzed_data = process_and_analyze(notices)
         print_screen_report(analyzed_data)
     else:
-        print("❌ 공고를 가져오지 못해 분석을 종료합니다. 위 로그의 에러 메시지를 확인해 주세요.")
+        print("❌ 공고를 가져오지 못해 분석을 종료합니다.")
