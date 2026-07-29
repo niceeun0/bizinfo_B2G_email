@@ -1,75 +1,53 @@
 # -*- coding: utf-8 -*-
 import os
 import re
-import time
+import urllib.request
+import json
+import ssl
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-import requests
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
-import urllib3
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
+# 💡 제공해주신 기업마당 API 정보
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
 CRTFC_KEY = "4vc2gy"
 
+# 정규식 패턴 정의
 EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 PHONE_PATTERN = re.compile(r"0\d{1,2}-\d{3,4}-\d{4}")
 DOC_KEYWORDS = ["사업자등록증", "재무제표", "신용평가", "인감증명서", "법인등기", "주주명부", "국세완납", "지방세완납", "견적서", "소개서", "이력서", "신청서"]
 
 def fetch_bizinfo_notices():
-    # 💡 직접 접속 대신 무료 CORS/API 프록시 우회 주소 활용
+    # 💡 직접 API 호출 주소 생성
     target_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=50"
-    proxy_url = f"https://api.allorigins.win/get?url={requests.utils.quote(target_url)}"
     
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
-    }
-    
-    try:
-        print("⏳ [수집 시작] 퍼블릭 프록시 서버를 통해 우회 접속 중...")
-        resp = requests.get(proxy_url, headers=headers, timeout=30)
-        if resp.status_code == 200:
-            import json
-            res_data = resp.json()
-            # allorigins 프록시는 내용을 'contents' 안에 담아줍니다.
-            actual_data = json.loads(res_data.get("contents", "{}"))
-            items = actual_data.get("jsonArray") or actual_data.get("item") or actual_data.get("items") or []
-            print(f"🎯 [수집 성공] 총 {len(items)}건의 공고를 가져왔습니다.")
-            return items
-        else:
-            print(f"❌ [프록시 응답 오류]: 상태 코드 {resp.status_code}")
-    except Exception as e:
-        print(f"❌ [우회 접속 에러]: {str(e)}")
-    return []
-    
-    # 💡 일반 브라우저처럼 보이도록 헤더를 완벽하게 강화
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/javascript, */*; q=0.01",
-        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://www.bizinfo.go.kr/"
-    }
-    
-    # 💡 접속이 끊기거나 타임아웃이 나면 최대 3번까지 자동으로 재시도하는 세션 구축
-    session = requests.Session()
-    retries = Retry(total=3, backoff_factor=2, status_forcelist=[500, 502, 503, 504])
-    session.mount("https://", HTTPAdapter(max_retries=retries))
+    # SSL 인증 우회 설정 (서버 간 통신 안정성 확보)
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+
+    req = urllib.request.Request(
+        target_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Accept": "application/json"
+        }
+    )
 
     try:
-        print("⏳ [수집 시작] 기업마당 API 서버 우회 접속 시도 중...")
-        resp = session.get(BIZINFO_API_URL, params=params, headers=headers, timeout=30, verify=False)
-        if resp.status_code == 200:
-            data = resp.json()
-            items = data.get("jsonArray") or data.get("item") or data.get("items") or []
-            print(f"🎯 [수집 성공] 총 {len(items)}건의 공고를 가져왔습니다.")
-            return items
-        else:
-            print(f"❌ [API 응답 오류]: 상태 코드 {resp.status_code}")
+        print("⏳ [수집 시작] 표준 보안 연결로 기업마당 API 호출 중...")
+        # 30초 타임아웃 설정
+        with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
+            if response.status == 200:
+                res_body = response.read().decode('utf-8')
+                data = json.loads(res_body)
+                items = data.get("jsonArray") or data.get("item") or data.get("items") or []
+                print(f"🎯 [수집 성공] 총 {len(items)}건의 공고를 가져왔습니다.")
+                return items
+            else:
+                print(f"❌ [API 응답 오류]: 상태 코드 {response.status}")
     except Exception as e:
-        print(f"❌ [API 연결 에러]: {str(e)}")
+        print(f"❌ [연결 에러]: {str(e)}")
     return []
 
 def analyze_and_build_html(items):
@@ -86,14 +64,17 @@ def analyze_and_build_html(items):
         
         full_text = f"{summary} {ref_name} {original_method}"
 
+        # 1. 대상 분류 (기업 vs 개인)
         target_type = "👤 개인" if ("개인" in full_text and "기업" not in full_text) else "🏢 기업"
 
+        # 2. 복수 이메일 전체 추출 (중복 제거)
         raw_emails = EMAIL_PATTERN.findall(full_text)
         emails = list(set(raw_emails))
         
         is_email_apply = "이메일" in original_method or "전자우편" in original_method or len(emails) > 0
         is_direct_apply = "방문" in original_method or "직접" in original_method or "우편" in original_method or "서면" in original_method
 
+        # 3. 원클릭 제안 및 이메일 칸 구성
         one_click_html = "-"
         email_html = "-"
 
@@ -105,6 +86,7 @@ def analyze_and_build_html(items):
         elif is_email_apply:
             one_click_html = '<span style="color:#137333; font-weight:bold; font-size:11px;">이메일 접수</span>'
 
+        # 4. 필요 서류 및 문의처 파싱
         found_docs = [doc for doc in DOC_KEYWORDS if doc in full_text]
         docs_html = ", ".join([f'<span style="color:#c5221f; font-weight:bold;">{d}</span>' for d in found_docs]) if found_docs else "공고문 참조"
         
