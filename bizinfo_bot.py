@@ -5,11 +5,13 @@ import urllib.request
 import json
 import ssl
 import smtplib
+import io
 import requests
 from bs4 import BeautifulSoup
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import google.generativeai as genai
+from pypdf import PdfReader
 
 # 제공해주신 기업마당 API 정보
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
@@ -51,36 +53,44 @@ def fetch_bizinfo_notices():
         print(f"❌ [연결 에러]: {str(e)}")
     return []
 
-def crawl_detail_text(url):
-    if not url or url == "#":
+def extract_text_from_pdf_url(pdf_url):
+    """API 응답에 포함된 PDF 다운로드 링크에서 텍스트를 추출합니다."""
+    if not pdf_url or not pdf_url.startswith("http"):
         return ""
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        res = requests.get(url, headers=headers, timeout=5)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, 'html.parser')
-            return re.sub(r'\s+', ' ', soup.get_text()).strip()
-    except Exception:
-        pass
+        res = requests.get(pdf_url, headers=headers, timeout=10)
+        if res.status_code == 200 and len(res.content) > 1000:
+            # PDF 바이너리 데이터를 메모리에서 읽기
+            pdf_file = io.BytesIO(res.content)
+            reader = PdfReader(pdf_file)
+            extracted_text = ""
+            # 전체 페이지 중 앞서 핵심 내용이 집중된 1~5페이지 위주로 추출
+            for page in reader.pages[:5]:
+                text = page.extract_text()
+                if text:
+                    extracted_text += text + "\n"
+            return extracted_text.strip()
+    except Exception as e:
+        print(f"⚠️ PDF 다운로드 및 파싱 중 오류: {str(e)}")
     return ""
 
 def analyze_with_gemini(full_text):
-    """Gemini API 최신 표준 모델(gemini-2.5-flash)을 이용해 모집규모와 필수 서류를 요약합니다."""
-    if not GEMINI_API_KEY:
+    """추출된 원본 문서 텍스트를 Gemini AI로 분석합니다."""
+    if not GEMINI_API_KEY or not full_text:
         return "공고문 참조", "공고문 참조"
     
     try:
-        # 404 에러 방지를 위해 최신 표준 모델명 gemini-2.5-flash 지정
         model = genai.GenerativeModel('gemini-2.5-flash')
         prompt = f"""
-        다음 지원사업 공고문 내용을 분석하여 정확히 아래 형식으로 두 줄만 답변해 주세요. 다른 사족은 절대 쓰지 마세요.
+        다음 지원사업 공식 공고문 원본 내용을 분석하여 정확히 아래 형식으로 두 줄만 답변해 주세요. 다른 사족은 절대 쓰지 마세요.
         
-        [공고문 내용]
-        {full_text[:4000]}
+        [공고문 원본 내용]
+        {full_text[:6000]}
         
         [출력 형식]
         모집규모: (예: 5개사 내외, 10개 업체 등 명확하게 요약. 없으면 공고문 참조)
-        필수서류: (예: 사업자등록증명, 납세증명서, 사업계획서 등 제출해야 하는 서류들을 쉼표로 구분하여 나열. 없으면 공고문 참조)
+        필수서류: (예: 사업자등록증명, 납세증명서, 사업계획서, 표준재무제표증명 등 제출해야 하는 서류들을 쉼표로 구분하여 나열. 없으면 공고문 참조)
         """
         
         response = model.generate_content(prompt)
@@ -113,8 +123,13 @@ def analyze_and_build_html(items):
         ref_name = item.get("refrncNm", "")
         original_method = item.get("reqstMthDscd") or item.get("reqstMthCn") or item.get("reqstMthPapersCn") or item.get("rcivMth") or "공고문 참조"
         
-        detail_text = crawl_detail_text(link)
-        full_text = f"{summary} {ref_name} {original_method} {detail_text}"
+        # 🔗 API 응답값에 들어있는 진짜 PDF 원본 파일 경로 추출 (`printFlpthNm`)
+        pdf_url = item.get("printFlpthNm", "")
+        pdf_filename = item.get("printFileNm", "")
+        
+        # PDF 파일에서 텍스트 추출 시도, 없으면 기본 요약 텍스트 활용
+        pdf_text = extract_text_from_pdf_url(pdf_url)
+        full_text = f"{summary} {ref_name} {original_method} {pdf_text}"
 
         # 이메일 접수 건 필터링
         raw_emails = EMAIL_PATTERN.findall(full_text)
@@ -125,8 +140,9 @@ def analyze_and_build_html(items):
             continue
 
         valid_count += 1
-        print(f"🤖 [AI 분석 중] '{title}' 공고 분석 중...")
+        print(f"🤖 [AI 원본 파일 분석 중] '{title}'...")
         
+        # 🧠 PDF 원본 텍스트 기반 Gemini AI 분석 수행
         parsed_scale, parsed_docs = analyze_with_gemini(full_text)
 
         target_type = "👤 개인" if ("개인" in full_text and "기업" not in full_text) else "🏢 기업"
@@ -143,10 +159,13 @@ def analyze_and_build_html(items):
         phones = PHONE_PATTERN.findall(full_text)
         contact_html = f"📞 {phones[0]}" if phones else (ref_name if ref_name else "-")
 
+        # PDF 원본 파일 바로보기 링크 제공
+        pdf_link_html = f'<br><a href="{pdf_url}" target="_blank" style="color:#d93025; font-size:11px; font-weight:bold;">📄 원본 PDF: {pdf_filename}</a>' if pdf_url else ""
+
         rows_html += f"""
         <tr>
             <td style="padding:10px; border-bottom:1px solid #eee; text-align:center; font-size:11px;">{target_type}</td>
-            <td style="padding:10px; border-bottom:1px solid #eee; font-weight:bold;">{title}<br>{scale_html}</td>
+            <td style="padding:10px; border-bottom:1px solid #eee; font-weight:bold;">{title}{pdf_link_html}<br>{scale_html}</td>
             <td style="padding:10px; border-bottom:1px solid #eee; color:#555;">{exec_org}</td>
             <td style="padding:10px; border-bottom:1px solid #eee; font-size:12px;">{period}</td>
             <td style="padding:10px; border-bottom:1px solid #eee; font-size:12px;">{original_method}</td>
@@ -171,13 +190,13 @@ def analyze_and_build_html(items):
     <head><meta charset="utf-8"></head>
     <body style="font-family:'Malgun Gothic', sans-serif; color:#333;">
         <div style="max-width:1500px; margin:0 auto; padding:20px;">
-            <h2 style="color:#004aad;">📊 B2G 이메일 접수 전용 AI 맞춤형 분석 리포트</h2>
-            <p>이메일 접수가 가능한 알짜배기 공고 총 {valid_count}건을 Gemini AI가 분석·요약하였습니다.</p>
+            <h2 style="color:#004aad;">📊 B2G 이메일 접수 전용 PDF 원본 AI 분석 리포트</h2>
+            <p>이메일 접수 공고 총 {valid_count}건의 공식 PDF 원본을 Gemini AI가 정밀 분석하였습니다.</p>
             <table style="width:100%; border-collapse:collapse; margin-top:15px;">
                 <thead>
                     <tr style="background-color:#f8fafc; color:#444; font-size:12px;">
                         <th style="padding:10px; border-bottom:2px solid #ddd;">구분</th>
-                        <th style="padding:10px; border-bottom:2px solid #ddd;">공고명 및 AI 분석(모집규모)</th>
+                        <th style="padding:10px; border-bottom:2px solid #ddd;">공고명 및 PDF 원본 AI 분석(규모)</th>
                         <th style="padding:10px; border-bottom:2px solid #ddd;">사업수행기관</th>
                         <th style="padding:10px; border-bottom:2px solid #ddd;">신청기간</th>
                         <th style="padding:10px; border-bottom:2px solid #ddd;">신청방법</th>
@@ -210,7 +229,7 @@ def send_email(html_body):
     receivers = [email.strip() for email in receiver_list.split(",")]
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = "📊 [AI 맞춤 리포트] 이메일 접수 B2G 공고 분석 결과"
+    msg["Subject"] = "📊 [PDF 원본 AI 분석] 이메일 접수 B2G 공고 리포트"
     msg["From"] = sender_email
     msg["To"] = ", ".join(receivers)
     
