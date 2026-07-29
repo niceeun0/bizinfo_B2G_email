@@ -15,7 +15,7 @@ import google.generativeai as genai
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
 CRTFC_KEY = "4vc2gy"
 
-# Gemini API 설정 (깃허브 Secrets의 GEMINI_API_KEY 연동)
+# Gemini API 설정
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -52,7 +52,6 @@ def fetch_bizinfo_notices():
     return []
 
 def crawl_detail_text(url):
-    """상세 페이지의 본문 텍스트를 깨끗하게 긁어옵니다."""
     if not url or url == "#":
         return ""
     try:
@@ -66,12 +65,12 @@ def crawl_detail_text(url):
     return ""
 
 def analyze_with_gemini(full_text):
-    """Gemini AI를 이용해 모집규모와 필수 서류를 정확하게 요약합니다."""
+    """Gemini API를 이용해 모집규모와 필수 서류를 정확하게 요약합니다 (최신 규격 적용)."""
     if not GEMINI_API_KEY:
-        return "모집규모: 공고문 참조", "필수 서류: 공고문 참조"
+        return "공고문 참조", "공고문 참조"
     
     try:
-        # 무료 모델 중 빠르고 가벼운 gemini-1.5-flash 활용
+        # 404 에러 방지를 위해 가장 범용적이고 안정적인 gemini-2.5-flash 또는 gemini-1.5-flash 명시적 지정
         model = genai.GenerativeModel('gemini-1.5-flash')
         prompt = f"""
         다음 지원사업 공고문 내용을 분석하여 정확히 아래 형식으로 두 줄만 답변해 주세요. 다른 사족은 절대 쓰지 마세요.
@@ -117,7 +116,7 @@ def analyze_and_build_html(items):
         detail_text = crawl_detail_text(link)
         full_text = f"{summary} {ref_name} {original_method} {detail_text}"
 
-        # 🔍 이메일 접수 건 필터링
+        # 이메일 접수 건 필터링
         raw_emails = EMAIL_PATTERN.findall(full_text)
         emails = list(set(raw_emails))
         is_email_apply = "이메일" in original_method or "전자우편" in original_method or len(emails) > 0
@@ -128,7 +127,6 @@ def analyze_and_build_html(items):
         valid_count += 1
         print(f"🤖 [AI 분석 중] '{title}' 공고 분석 중...")
         
-        # 🧠 이메일 접수 공고만 선별하여 Gemini AI 분석 수행
         parsed_scale, parsed_docs = analyze_with_gemini(full_text)
 
         target_type = "👤 개인" if ("개인" in full_text and "기업" not in full_text) else "🏢 기업"
