@@ -15,21 +15,20 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # API 및 환경 변수 설정
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
-CRTFC_KEY = "4vc2gy"  # 👈 새로 발급받으신 인증키 적용 완료!
+CRTFC_KEY = "4vc2gy"  # 새로 발급받으신 인증키
 
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 
 # =====================================================================
-# 💡 이메일 설정 부분 (여기를 꼭 수정해 주세요!)
+# 💡 이메일 설정 부분 (여기를 대표님 환경에 맞게 수정해 주세요!)
 # =====================================================================
-SENDER_EMAIL = "niceeun095@gmail.com"  
+SENDER_EMAIL = "발송할_내메일@gmail.com"  
 SENDER_PASSWORD = os.environ.get("EMAIL_PASS")
 
 RECEIVER_EMAILS = [
-    "s_e_y_0615@naver.com", 
-    "eyson0615@gmail.com",
-    "eyson0615@nice.co.kr"
+    "첫번째사람@naver.com", 
+    "두번째사람@gmail.com"
 ]
 # =====================================================================
 
@@ -41,15 +40,15 @@ EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 PHONE_PATTERN = re.compile(r"0\d{1,2}-\d{3,4}-\d{4}")
 
 def fetch_bizinfo_notices():
-    # 💡 인증키와 파라미터를 URL에 직접 결합하여 유실 방지
-    req_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=100&pageIndex=1"
+    # 💡 브라우저 검증이 완료된 가장 확실한 주소 호출 방식 (searchCnt=10)
+    req_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=10&pageIndex=1"
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
     try:
-        print("⏳ 기업마당 API 서버에 데이터를 요청합니다...")
+        print("⏳ 브라우저 검증 완료된 주소로 API를 호출합니다...")
         resp = requests.get(req_url, headers=headers, timeout=15, verify=False)
         print(f"✅ 서버 응답 상태 코드: {resp.status_code}")
         
