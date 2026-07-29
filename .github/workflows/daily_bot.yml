@@ -17,7 +17,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install system dependencies (for HWP/HWPX/DOC parsing)
+      - name: Install system dependencies (for document parsing)
         run: |
           sudo apt-get update
           sudo apt-get install -y libreoffice antiword
@@ -25,7 +25,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 google-generativeai pypdf
+          pip install requests beautifulsoup4 groq pypdf
 
       - name: Run bot script
         run: python bizinfo_bot.py
