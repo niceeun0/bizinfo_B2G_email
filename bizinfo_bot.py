@@ -15,23 +15,25 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # API 및 환경 변수 설정
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
-CRTFC_KEY = "Ofgt6R"  # 대표님의 기업마당 인증키
+CRTFC_KEY = "Ofgt6R"  # 기업마당 인증키
 
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
-SENDER_EMAIL = "niceeun095@gmail.com"  # 👈 대표님/회사 발송용 Gmail 주소로 변경
-SENDER_PASSWORD = os.environ.get("EMAIL_PASS")  # 깃허브 Secrets에서 안전하게 가져옴
+
+# =====================================================================
+# 💡 이메일 설정 부분 (여기를 꼭 수정해 주세요!)
+# =====================================================================
+SENDER_EMAIL = "발송할_내메일@gmail.com"  
+SENDER_PASSWORD = os.environ.get("EMAIL_PASS")
+
 RECEIVER_EMAILS = [
     "s_e_y_0615@naver.com", 
     "eyson0615@gmail.com",
     "eyson0615@nice.co.kr"
 ]
+# =====================================================================
 
-# 🎯 타겟팅 필터링 키워드
-TARGET_KEYWORDS = [
-    "데이터바우처", "마이데이터", "블록체인", "실증", 
-    "기업정보", "기업DB", "데이터", "기업개요", "기업데이터"
-]
+# 💡 타겟 키워드 필터링은 삭제했습니다. 모든 공고를 가져옵니다!
 
 CORP_KEYWORDS = ["중소기업", "기업", "법인", "사업자", "컨소시엄", "주관기관", "벤처", "소상공인"]
 INDIVIDUAL_KEYWORDS = ["개인", "일반국민", "청년", "구직자", "학생", "개인사업자 제외"]
@@ -41,6 +43,7 @@ EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 PHONE_PATTERN = re.compile(r"0\d{1,2}-\d{3,4}-\d{4}")
 
 def fetch_bizinfo_notices():
+    # searchCnt: "100" (최근 100건을 가져옵니다)
     params = {"crtfcKey": CRTFC_KEY, "dataType": "json", "searchCnt": "100", "pageIndex": "1"}
     try:
         resp = requests.get(BIZINFO_API_URL, params=params, timeout=15, verify=False)
@@ -64,9 +67,7 @@ def process_and_analyze(items):
         contact_info = item.get("refrncNm", "")
         papers_info = item.get("reqstMthPapersCn", "")
         
-        full_text = f"{title} {summary}"
-        if not any(kw in full_text for kw in TARGET_KEYWORDS):
-            continue
+        # 💡 필터링 없이 모두 패스!
             
         target_text = f"{target_nm} {summary}"
         corp_score = sum(target_text.count(kw) for kw in CORP_KEYWORDS)
@@ -103,15 +104,15 @@ def process_and_analyze(items):
 
 def send_email_report(results):
     if not results:
-        print("오늘 포착된 신규 지원사업이 없습니다.")
+        print("조회된 공고가 없습니다.")
         return
 
     today_str = datetime.now().strftime("%Y년 %m월 %d일")
     html_content = f"""
     <html>
     <body style="font-family: 'Malgun Gothic', sans-serif; line-height: 1.6; color: #333;">
-        <h2 style="color: #004aad;">📡 [기업마당] 오늘의 B2G 데이터/지원사업 포착 리포트 ({today_str})</h2>
-        <p>포착 키워드: <b>데이터, 기업개요, 기업데이터, 마이데이터, 블록체인, 실증 등</b></p>
+        <h2 style="color: #004aad;">📡 [기업마당] 오늘의 신규 지원사업 전체 리포트 ({today_str})</h2>
+        <p>※ 최근 등록된 <b>{len(results)}건</b>의 전체 지원사업 공고입니다.</p>
         <hr style="border: 1px solid #ddd;">
         <table border="1" cellpadding="10" cellspacing="0" style="border-collapse: collapse; width: 100%; text-align: left; font-size: 14px;">
             <tr style="background-color: #f2f4f7;">
@@ -134,17 +135,17 @@ def send_email_report(results):
     html_content += "</table></body></html>"
     
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = f"[B2G 알림] {today_str} 신규 지원사업 {len(results)}건 포착"
+    msg["Subject"] = f"[B2G 알림] {today_str} 전체 신규 지원사업 {len(results)}건 도착"
     msg["From"] = SENDER_EMAIL
-    msg["To"] = RECEIVER_EMAIL
+    msg["To"] = ", ".join(RECEIVER_EMAILS)
     msg.attach(MIMEText(html_content, "html"))
     
     server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
     server.starttls()
     server.login(SENDER_EMAIL, SENDER_PASSWORD)
-    server.sendmail(SENDER_EMAIL, RECEIVER_EMAIL, msg.as_string())
+    server.sendmail(SENDER_EMAIL, RECEIVER_EMAILS, msg.as_string())
     server.quit()
-    print("🎉 이메일 발송 성공!")
+    print(f"🎉 전체 공고 {len(results)}건 이메일 단체 발송 성공!")
 
 if __name__ == "__main__":
     notices = fetch_bizinfo_notices()
