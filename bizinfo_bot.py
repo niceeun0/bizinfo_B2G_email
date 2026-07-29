@@ -23,7 +23,7 @@ SMTP_PORT = 587
 # =====================================================================
 # 💡 이메일 설정 부분 (여기를 꼭 수정해 주세요!)
 # =====================================================================
-SENDER_EMAIL = "발송할_내메일@gmail.com"  
+SENDER_EMAIL = "niceeun095@gmail.com"  
 SENDER_PASSWORD = os.environ.get("EMAIL_PASS")
 
 RECEIVER_EMAILS = [
