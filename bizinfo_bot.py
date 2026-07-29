@@ -19,9 +19,13 @@ CRTFC_KEY = "Ofgt6R"  # 대표님의 기업마당 인증키
 
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
-SENDER_EMAIL = "발송할_메일_주소@gmail.com"  # 👈 대표님/회사 발송용 Gmail 주소로 변경
+SENDER_EMAIL = "niceeun095@gmail.com"  # 👈 대표님/회사 발송용 Gmail 주소로 변경
 SENDER_PASSWORD = os.environ.get("EMAIL_PASS")  # 깃허브 Secrets에서 안전하게 가져옴
-RECEIVER_EMAIL = "수신받을_영업팀_메일@ourdomain.com"  # 👈 메일 받을 대표님/영업팀 이메일로 변경
+RECEIVER_EMAILS = [
+    "s_e_y_0615@naver.com", 
+    "eyson0615@gmail.com",
+    "eyson0615@nice.co.kr"
+]
 
 # 🎯 타겟팅 필터링 키워드
 TARGET_KEYWORDS = [
