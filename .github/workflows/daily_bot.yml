@@ -19,7 +19,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests
+          pip install requests beautifulsoup4
+
 
       - name: Run script
         run: python bizinfo_bot.py
