@@ -11,17 +11,16 @@ import requests
 from bs4 import BeautifulSoup
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-import google.generativeai as genai
+from groq import Groq
 from pypdf import PdfReader
 
 # 기업마당 API 정보
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
 CRTFC_KEY = "4vc2gy"
 
-# Gemini API 설정
+# GEMINI_API_KEY 이름을 그대로 가져와서 Groq 클라이언트에 연동
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+client = Groq(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 PHONE_PATTERN = re.compile(r"0\d{1,2}-\d{3,4}-\d{4}")
@@ -70,7 +69,7 @@ def extract_text_from_pdf_url(pdf_url):
             pdf_file = io.BytesIO(res.content)
             reader = PdfReader(pdf_file)
             extracted_text = ""
-            for page in reader.pages[:6]: # 앞쪽 6페이지까지 넉넉하게 추출
+            for page in reader.pages[:6]:
                 text = page.extract_text()
                 if text:
                     extracted_text += text + "\n"
@@ -79,44 +78,63 @@ def extract_text_from_pdf_url(pdf_url):
         print(f"⚠️ PDF 파싱 중 오류: {str(e)}")
     return ""
 
-def analyze_with_gemini(full_text):
-    """Gemini AI가 공고문을 분석하여 규모와 필수 서류를 무조건 도출하도록 유도합니다."""
-    if not GEMINI_API_KEY or not full_text:
+def analyze_with_groq(full_text):
+    """Groq API를 이용해 빠르고 안정적으로 규모와 필수 서류를 추출합니다."""
+    if not client or not full_text:
         return "지원 규모 정보 확인 필요", "필수 서류 확인 필요"
     
-    try:
-        model = genai.GenerativeModel('gemini-2.5-flash')
-        prompt = f"""
-        다음 지원사업 공고문 내용을 분석하여 아래 두 가지 항목을 명확하게 파악해 주세요.
-        
-        1. 지원규모: 선정하는 기업(개사/개소) 수, 지원 예산이나 금액 등이 있다면 포함하여 구체적으로 작성해 주세요. (예: 10개사 내외, 총 5천만원 지원 등)
-        2. 필수서류: 제출해야 하는 필수 서류들(예: 사업자등록증명, 국세/지방세 납세증명서, 표준재무제표증명, 사업계획서 등)을 쉼표로 구분하여 구체적으로 나열해 주세요.
-        
-        반드시 아래 양식 그대로 정확히 두 줄만 답변해 주세요. 다른 사족은 절대 포함하지 마세요.
-        
-        지원규모: [내용 작성]
-        필수서류: [내용 작성]
-        
-        [공고문 내용]
-        {full_text[:7000]}
-        """
-        
-        response = model.generate_content(prompt)
-        text_resp = response.text.strip()
-        
-        scale_result = "지원 규모 정보 확인 필요"
-        docs_result = "필수 서류 확인 필요"
-        
-        for line in text_resp.split('\n'):
-            if "지원규모:" in line or "모집규모:" in line:
-                scale_result = line.split(":", 1)[1].strip()
-            elif "필수서류:" in line:
-                docs_result = line.split(":", 1)[1].strip()
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            completion = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "당신은 정부 지원사업 공고문을 분석하여 지원 규모와 필수 제출 서류를 정확하게 요약해주는 전문 어시스턴트입니다. 지정된 형식으로만 답변하세요."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"""
+다음 지원사업 공고문 내용을 분석하여 아래 두 가지 항목을 명확하게 파악해 주세요.
+
+1. 지원규모: 선정하는 기업(개사/개소) 수, 지원 예산이나 금액 등이 있다면 포함하여 구체적으로 작성해 주세요. (예: 10개사 내외, 총 5천만원 지원 등)
+2. 필수서류: 제출해야 하는 필수 서류들(예: 사업자등록증명, 국세/지방세 납세증명서, 표준재무제표증명, 사업계획서 등)을 쉼표로 구분하여 구체적으로 나열해 주세요.
+
+반드시 아래 양식 그대로 정확히 두 줄만 답변해 주세요. 다른 사족은 절대 포함하지 마세요.
+
+지원규모: [내용 작성]
+필수서류: [내용 작성]
+
+[공고문 내용]
+{full_text[:7000]}
+                        """
+                    }
+                ],
+                temperature=0.1,
+                max_tokens=300,
+            )
+            
+            text_resp = completion.choices[0].message.content.strip()
+            
+            scale_result = "지원 규모 정보 확인 필요"
+            docs_result = "필수 서류 확인 필요"
+            
+            for line in text_resp.split('\n'):
+                if "지원규모:" in line or "모집규모:" in line:
+                    scale_result = line.split(":", 1)[1].strip()
+                elif "필수서류:" in line:
+                    docs_result = line.split(":", 1)[1].strip()
+                    
+            return scale_result, docs_result
+        except Exception as e:
+            print(f"⚠️ Groq API 분석 중 오류 (시도 {attempt}/{max_retries}): {str(e)}")
+            if attempt < max_retries:
+                time.sleep(3)
+            else:
+                break
                 
-        return scale_result, docs_result
-    except Exception as e:
-        print(f"⚠️ Gemini AI 분석 중 오류: {str(e)}")
-        return "지원 규모 정보 확인 필요", "필수 서류 확인 필요"
+    return "지원 규모 정보 확인 필요", "필수 서류 확인 필요"
 
 def analyze_and_build_html(items):
     rows_html = ""
@@ -135,7 +153,6 @@ def analyze_and_build_html(items):
         pdf_text = extract_text_from_pdf_url(pdf_url)
         full_text = f"{summary} {ref_name} {original_method} {pdf_text}"
 
-        # 이메일 접수 건 필터링
         raw_emails = EMAIL_PATTERN.findall(full_text)
         emails = list(set(raw_emails))
         is_email_apply = "이메일" in original_method or "전자우편" in original_method or len(emails) > 0
@@ -144,10 +161,10 @@ def analyze_and_build_html(items):
             continue
 
         valid_count += 1
-        print(f"🤖 [AI 원본 분석 중] '{title}'...")
+        print(f"🤖 [Groq AI 분석 중 ({valid_count})] '{title}'...")
         
-        # 🧠 AI 분석 수행 (규모 및 필수서류 도출)
-        parsed_scale, parsed_docs = analyze_with_gemini(full_text)
+        parsed_scale, parsed_docs = analyze_with_groq(full_text)
+        time.sleep(0.5)
 
         target_type = "👤 개인" if ("개인" in full_text and "기업" not in full_text) else "🏢 기업"
         email_html = "<br>".join([f"📧 {e}" for e in emails]) if emails else "-"
@@ -157,7 +174,6 @@ def analyze_and_build_html(items):
         else:
             one_click_html = '<span style="color:#137333; font-weight:bold; font-size:11px;">이메일 접수</span>'
 
-        # 대시보드 표에 AI가 분석한 내용이 선명하게 보이도록 구성
         scale_html = f'<div style="background:#f1f3f4; padding:5px 8px; border-radius:4px; margin-top:4px; color:#1a73e8; font-size:11px; font-weight:bold;">📌 지원규모: {parsed_scale}</div>'
         docs_html = f'<div style="color:#c5221f; font-weight:bold; font-size:11px; background:#fdf2f2; padding:6px; border-radius:4px;">📋 {parsed_docs}</div>'
         
@@ -192,8 +208,8 @@ def analyze_and_build_html(items):
     <head><meta charset="utf-8"></head>
     <body style="font-family:'Malgun Gothic', sans-serif; color:#333;">
         <div style="max-width:1600px; margin:0 auto; padding:20px;">
-            <h2 style="color:#004aad;">📊 B2G 이메일 접수 공고 & AI 분석 대시보드</h2>
-            <p>이메일 접수가 가능한 알짜배기 공고 총 <b>{valid_count}건</b>의 원문 파일을 Gemini AI가 정밀 분석하여 규모와 필수 서류를 추출했습니다.</p>
+            <h2 style="color:#004aad;">📊 B2G 이메일 접수 공고 & Groq AI 분석 대시보드</h2>
+            <p>이메일 접수가 가능한 알짜배기 공고 총 <b>{valid_count}건</b>의 원문 파일을 Groq AI가 정밀 분석하여 규모와 필수 서류를 추출했습니다.</p>
             <table style="width:100%; border-collapse:collapse; margin-top:15px; background:#fff;">
                 <thead>
                     <tr style="background-color:#f8fafc; color:#444; font-size:12px;">
@@ -231,7 +247,7 @@ def send_email(html_body):
     receivers = [email.strip() for email in receiver_list.split(",")]
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = "📊 [B2G AI 대시보드] 이메일 접수 공고별 규모 및 필수 서류 분석 결과"
+    msg["Subject"] = "📊 [B2G Groq AI 대시보드] 이메일 접수 공고별 규모 및 필수 서류 분석 결과"
     msg["From"] = sender_email
     msg["To"] = ", ".join(receivers)
     
