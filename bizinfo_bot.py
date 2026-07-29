@@ -18,7 +18,7 @@ from pypdf import PdfReader
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
 CRTFC_KEY = "4vc2gy"
 
-# GEMINI_API_KEY 이름을 그대로 가져와서 Groq 클라이언트에 연동
+# GEMINI_API_KEY 환경변수에서 Groq 클라이언트 연동
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 client = Groq(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
@@ -66,6 +66,8 @@ def extract_text_from_pdf_url(pdf_url):
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         res = requests.get(pdf_url, headers=headers, timeout=10)
         if res.status_code == 200 and len(res.content) > 1000:
+            if not res.content.startswith(b'%PDF'):
+                return ""
             pdf_file = io.BytesIO(res.content)
             reader = PdfReader(pdf_file)
             extracted_text = ""
@@ -74,12 +76,12 @@ def extract_text_from_pdf_url(pdf_url):
                 if text:
                     extracted_text += text + "\n"
             return extracted_text.strip()
-    except Exception as e:
-        print(f"⚠️ PDF 파싱 중 오류: {str(e)}")
+    except Exception:
+        pass
     return ""
 
 def analyze_with_groq(full_text):
-    """Groq API를 이용해 빠르고 안정적으로 규모와 필수 서류를 추출합니다."""
+    """Groq API를 통해 지원규모와 필수서류를 정확하고 간결하게 추출합니다."""
     if not client or not full_text:
         return "지원 규모 정보 확인 필요", "필수 서류 확인 필요"
     
@@ -91,15 +93,15 @@ def analyze_with_groq(full_text):
                 messages=[
                     {
                         "role": "system",
-                        "content": "당신은 정부 지원사업 공고문을 분석하여 지원 규모와 필수 제출 서류를 정확하게 요약해주는 전문 어시스턴트입니다. 지정된 형식으로만 답변하세요."
+                        "content": "당신은 정부 지원사업 공고문을 분석하여 지원 규모(선정 기업 수 및 지원 예산)와 필수 제출 서류를 명확하고 간결하게 요약해주는 전문 어시스턴트입니다."
                     },
                     {
                         "role": "user",
                         "content": f"""
-다음 지원사업 공고문 내용을 분석하여 아래 두 가지 항목을 명확하게 파악해 주세요.
+다음 지원사업 공고문 내용을 분석하여 아래 두 가지 항목을 파악해 주세요.
 
-1. 지원규모: 선정하는 기업(개사/개소) 수, 지원 예산이나 금액 등이 있다면 포함하여 구체적으로 작성해 주세요. (예: 10개사 내외, 총 5천만원 지원 등)
-2. 필수서류: 제출해야 하는 필수 서류들(예: 사업자등록증명, 국세/지방세 납세증명서, 표준재무제표증명, 사업계획서 등)을 쉼표로 구분하여 구체적으로 나열해 주세요.
+1. 지원규모: 선정하는 기업 수(예: 10개사 내외)와 지원 금액(예: 최대 5천만 원)을 포함하여 1~2문장으로 간결하게 요약해 주세요. 정보가 없으면 "확인 필요"라고 적어주세요.
+2. 필수서류: 제출해야 하는 필수 서류들(예: 사업자등록증명, 납세증명서, 사업계획서 등)을 쉼표로 구분하여 나열해 주세요. 정보가 없으면 "확인 필요"라고 적어주세요.
 
 반드시 아래 양식 그대로 정확히 두 줄만 답변해 주세요. 다른 사족은 절대 포함하지 마세요.
 
@@ -155,7 +157,7 @@ def analyze_and_build_html(items):
 
         raw_emails = EMAIL_PATTERN.findall(full_text)
         emails = list(set(raw_emails))
-        is_email_apply = "이메일" in original_method or "전자우편" in original_method or len(emails) > 0
+        is_email_apply = "email" in original_method.lower() or "이메일" in original_method or "전자우편" in original_method or len(emails) > 0
         
         if not is_email_apply:
             continue
@@ -167,29 +169,44 @@ def analyze_and_build_html(items):
         time.sleep(0.5)
 
         target_type = "👤 개인" if ("개인" in full_text and "기업" not in full_text) else "🏢 기업"
+        email_str = ", ".join(emails) if emails else ""
         email_html = "<br>".join([f"📧 {e}" for e in emails]) if emails else "-"
         
+        # ⚡ 원클릭 메일 제안 버튼 (여러 이메일이 있을 경우 하나의 버튼으로 통합)
         if len(emails) > 0:
-            one_click_html = "<br>".join([f'<a href="mailto:{e}" style="background:#e6f4ea; color:#137333; padding:6px 10px; border-radius:4px; font-size:11px; font-weight:bold; text-decoration:none; display:inline-block; margin:2px 0;">⚡ 원클릭 메일 제안</a>' for e in emails])
+            to_emails = emails[0]
+            cc_emails = ",".join(emails[1:]) if len(emails) > 1 else ""
+            mailto_link = f"mailto:{to_emails}"
+            if cc_emails:
+                mailto_link += f"?cc={cc_emails}"
+            one_click_html = f'<a href="{mailto_link}" style="background:#e6f4ea; color:#137333; padding:6px 12px; border-radius:4px; font-size:11px; font-weight:bold; text-decoration:none; display:inline-block;">⚡ 원클릭 메일 제안</a>'
         else:
             one_click_html = '<span style="color:#137333; font-weight:bold; font-size:11px;">이메일 접수</span>'
 
-        scale_html = f'<div style="background:#f1f3f4; padding:5px 8px; border-radius:4px; margin-top:4px; color:#1a73e8; font-size:11px; font-weight:bold;">📌 지원규모: {parsed_scale}</div>'
-        docs_html = f'<div style="color:#c5221f; font-weight:bold; font-size:11px; background:#fdf2f2; padding:6px; border-radius:4px;">📋 {parsed_docs}</div>'
+        scale_cell = f'<span style="color:#1a73e8; font-weight:bold; font-size:12px;">{parsed_scale}</span>'
+        docs_cell = f'<span style="color:#c5221f; font-weight:bold; font-size:11px;">{parsed_docs}</span>'
         
         phones = PHONE_PATTERN.findall(full_text)
         contact_html = f"📞 {phones[0]}" if phones else (ref_name if ref_name else "-")
 
+        # 엑셀(CSV) 다운로드를 위해 텍스트 정제 (따옴표 및 줄바꿈 제거)
+        safe_title = title.replace('"', '""').replace('\n', ' ')
+        safe_org = exec_org.replace('"', '""')
+        safe_scale = parsed_scale.replace('"', '""')
+        safe_docs = parsed_docs.replace('"', '""')
+        safe_emails = email_str.replace('"', '""')
+
         rows_html += f"""
-        <tr>
+        <tr data-row='{{"구분":"{target_type}","공고명":"{safe_title}","지원규모":"{safe_scale}","수행기관":"{safe_org}","신청기간":"{period}","신청방법":"{original_method}","이메일":"{safe_emails}","필수서류":"{safe_docs}"}}'>
             <td style="padding:12px; border-bottom:1px solid #eee; text-align:center; font-size:11px;">{target_type}</td>
-            <td style="padding:12px; border-bottom:1px solid #eee; font-weight:bold;">{title}{scale_html}</td>
+            <td style="padding:12px; border-bottom:1px solid #eee; font-weight:bold;">{title}</td>
+            <td style="padding:12px; border-bottom:1px solid #eee;">{scale_cell}</td>
             <td style="padding:12px; border-bottom:1px solid #eee; color:#555;">{exec_org}</td>
             <td style="padding:12px; border-bottom:1px solid #eee; font-size:12px;">{period}</td>
             <td style="padding:12px; border-bottom:1px solid #eee; font-size:12px;">{original_method}</td>
             <td style="padding:12px; border-bottom:1px solid #eee; text-align:center;">{one_click_html}</td>
             <td style="padding:12px; border-bottom:1px solid #eee; font-size:12px;">{email_html}</td>
-            <td style="padding:12px; border-bottom:1px solid #eee;">{docs_html}</td>
+            <td style="padding:12px; border-bottom:1px solid #eee;">{docs_cell}</td>
             <td style="padding:12px; border-bottom:1px solid #eee; font-size:11px;">{contact_html}</td>
             <td style="padding:12px; border-bottom:1px solid #eee; text-align:center;"><a href="{link}" target="_blank" style="background:#004aad; color:white; padding:6px 10px; text-decoration:none; border-radius:4px; font-size:11px;">보기</a></td>
         </tr>
@@ -198,29 +215,70 @@ def analyze_and_build_html(items):
     if valid_count == 0:
         rows_html = """
         <tr>
-            <td colspan="10" style="padding:20px; text-align:center; color:#666;">수집된 공고 중 이메일 접수 건이 없습니다.</td>
+            <td colspan="11" style="padding:20px; text-align:center; color:#666;">수집된 공고 중 이메일 접수 건이 없습니다.</td>
         </tr>
         """
 
     html_content = f"""
     <!DOCTYPE html>
     <html>
-    <head><meta charset="utf-8"></head>
+    <head>
+        <meta charset="utf-8">
+        <script>
+            function downloadCSV() {{
+                let rows = document.querySelectorAll("table tbody tr[data-row]");
+                if (rows.length === 0) {{
+                    alert("다운로드할 데이터가 없습니다.");
+                    return;
+                }}
+                let csvContent = "\\uFEFF"; // UTF-8 BOM (엑셀 한글 깨짐 방지)
+                csvContent += "구분,공고명,지원규모,수행기관,신청기간,신청방법,이메일,필수서류\\n";
+                
+                rows.forEach(function(row) {{
+                    let data = JSON.parse(row.getAttribute("data-row"));
+                    let line = [
+                        '"' + (data.구분 || "") + '"',
+                        '"' + (data.공고명 || "") + '"',
+                        '"' + (data.지원규모 || "") + '"',
+                        '"' + (data.수행기관 || "") + '"',
+                        '"' + (data.신청기간 || "") + '"',
+                        '"' + (data.신청방법 || "") + '"',
+                        '"' + (data.이메일 || "") + '"',
+                        '"' + (data.필수서류 || "") + '"'
+                    ].join(",");
+                    csvContent += line + "\\n";
+                }});
+                
+                let blob = new Blob([csvContent], {{ type: 'text/csv;charset=utf-8;' }});
+                let url = URL.createObjectURL(blob);
+                let a = document.createElement("a");
+                a.href = url;
+                a.download = "B2G_AI_Report.csv";
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            }}
+        </script>
+    </head>
     <body style="font-family:'Malgun Gothic', sans-serif; color:#333;">
-        <div style="max-width:1600px; margin:0 auto; padding:20px;">
-            <h2 style="color:#004aad;">📊 B2G 이메일 접수 공고 & Groq AI 분석 대시보드</h2>
-            <p>이메일 접수가 가능한 알짜배기 공고 총 <b>{valid_count}건</b>의 원문 파일을 Groq AI가 정밀 분석하여 규모와 필수 서류를 추출했습니다.</p>
+        <div style="max-width:1700px; margin:0 auto; padding:20px;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+                <h2 style="color:#004aad; margin:0;">📊 B2G 이메일 접수 공고 & Groq AI 분석 대시보드</h2>
+                <button onclick="downloadCSV()" style="background:#137333; color:white; border:none; padding:10px 16px; border-radius:6px; font-weight:bold; cursor:pointer; font-size:13px;">📥 대시보드 엑셀(CSV) 다운로드</button>
+            </div>
+            <p style="margin-top:10px;">이메일 접수가 가능한 알짜배기 공고 총 <b>{valid_count}건</b>의 원문 파일을 Groq AI가 정밀 분석하여 규모와 필수 서류를 칸별로 분리 추출했습니다.</p>
             <table style="width:100%; border-collapse:collapse; margin-top:15px; background:#fff;">
                 <thead>
                     <tr style="background-color:#f8fafc; color:#444; font-size:12px;">
                         <th style="padding:12px; border-bottom:2px solid #ddd;">구분</th>
-                        <th style="padding:12px; border-bottom:2px solid #ddd; width:22%;">공고명 및 AI 분석(지원규모)</th>
+                        <th style="padding:12px; border-bottom:2px solid #ddd; width:20%;">공고명</th>
+                        <th style="padding:12px; border-bottom:2px solid #ddd; width:15%;">📌 지원규모</th>
                         <th style="padding:12px; border-bottom:2px solid #ddd;">사업수행기관</th>
                         <th style="padding:12px; border-bottom:2px solid #ddd;">신청기간</th>
                         <th style="padding:12px; border-bottom:2px solid #ddd;">신청방법</th>
                         <th style="padding:12px; border-bottom:2px solid #ddd;">원클릭 메일 제안</th>
                         <th style="padding:12px; border-bottom:2px solid #ddd;">접수 이메일</th>
-                        <th style="padding:12px; border-bottom:2px solid #ddd; width:22%;">🤖 AI 분석 필수 서류</th>
+                        <th style="padding:12px; border-bottom:2px solid #ddd; width:20%;">📋 AI 분석 필수 서류</th>
                         <th style="padding:12px; border-bottom:2px solid #ddd;">담당 문의처</th>
                         <th style="padding:12px; border-bottom:2px solid #ddd;">바로가기</th>
                     </tr>
