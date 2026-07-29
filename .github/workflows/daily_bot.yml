@@ -1,29 +1,30 @@
-name: Bizinfo B2G Daily Email Bot
+name: Bizinfo Bot
 
 on:
   schedule:
-    # 매일 아침 8시 30분 (KST) 자동 실행 (UTC 23:30)
-    - cron: '30 23 * * *'
-  workflow_dispatch: # 깃허브 웹 화면에서 버튼 눌러 즉시 실행 가능하도록 설정
+    - cron: '0 23 * * *' # 매일 밤 11시(UTC) 실행 등 원하시는 스케줄
+  workflow_dispatch: # 수동 실행 버튼
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
-      - name: 코드 불러오기
+      - name: Checkout repo
         uses: actions/checkout@v3
 
-      - name: 파이썬 설치
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
 
-      - name: 필요 라이브러리 설치
+      - name: Install dependencies
         run: |
-          pip install requests pdfplumber urllib3
+          pip install requests
 
-      - name: 자동화 봇 실행
+      - name: Run script
+        run: python bizinfo_bot.py
         env:
-          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
-        run: |
-          python bizinfo_bot.py
+          # 💡 깃허브 Secrets에 등록한 이름과 아래 환경변수 이름을 정확히 매칭해 주어야 합니다!
+          MAIL_USER: ${{ secrets.MAIL_USER }}
+          MAIL_PASS: ${{ secrets.MAIL_PASS }}
+          MAIL_RECEIVER: ${{ secrets.MAIL_RECEIVER }}
