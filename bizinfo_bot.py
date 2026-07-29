@@ -11,16 +11,19 @@ import requests
 from bs4 import BeautifulSoup
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from groq import Groq
+from openai import OpenAI
 from pypdf import PdfReader
 
 # 기업마당 API 정보
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
 CRTFC_KEY = "4vc2gy"
 
-# GEMINI_API_KEY 환경변수에서 Groq 클라이언트 연동
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-client = Groq(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+# OpenRouter 설정 (GEMINI_API_KEY 환경변수 활용)
+API_KEY = os.environ.get("GEMINI_API_KEY")
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=API_KEY,
+) if API_KEY else None
 
 EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 PHONE_PATTERN = re.compile(r"0\d{1,2}-\d{3,4}-\d{4}")
@@ -71,7 +74,7 @@ def extract_text_from_pdf_url(pdf_url):
             pdf_file = io.BytesIO(res.content)
             reader = PdfReader(pdf_file)
             extracted_text = ""
-            for page in reader.pages[:6]:
+            for page in reader.pages[:5]:
                 text = page.extract_text()
                 if text:
                     extracted_text += text + "\n"
@@ -80,28 +83,26 @@ def extract_text_from_pdf_url(pdf_url):
         pass
     return ""
 
-def analyze_with_groq(full_text):
-    """Groq API를 통해 지원규모와 필수서류를 정확하고 간결하게 추출합니다."""
+def analyze_with_openrouter(full_text):
+    """OpenRouter API(openrouter/free)를 통해 강화된 서류 목록과 지원규모를 추출합니다."""
     if not client or not full_text:
         return "지원 규모 정보 확인 필요", "필수 서류 확인 필요"
     
-    max_retries = 3
-    for attempt in range(1, max_retries + 1):
-        try:
-            completion = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "당신은 정부 지원사업 공고문을 분석하여 지원 규모(선정 기업 수 및 지원 예산)와 필수 제출 서류를 명확하고 간결하게 요약해주는 전문 어시스턴트입니다."
-                    },
-                    {
-                        "role": "user",
-                        "content": f"""
+    try:
+        completion = client.chat.completions.create(
+            model="openrouter/free",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "당신은 정부 지원사업 공고문을 분석하여 지원 규모와 필수 제출 서류를 명확하고 간결하게 요약해주는 전문 어시스턴트입니다."
+                },
+                {
+                    "role": "user",
+                    "content": f"""
 다음 지원사업 공고문 내용을 분석하여 아래 두 가지 항목을 파악해 주세요.
 
-1. 지원규모: 선정하는 기업 수(예: 10개사 내외)와 지원 금액(예: 최대 5천만 원)을 포함하여 1~2문장으로 간결하게 요약해 주세요. 정보가 없으면 "확인 필요"라고 적어주세요.
-2. 필수서류: 제출해야 하는 필수 서류들(예: 사업자등록증명, 납세증명서, 사업계획서 등)을 쉼표로 구분하여 나열해 주세요. 정보가 없으면 "확인 필요"라고 적어주세요.
+1. 지원규모: 선정하는 기업 수와 지원 금액을 포함하여 1문장으로 간결하게 요약해 주세요. 정보가 없으면 "확인 필요"라고 적어주세요.
+2. 필수서류: 제출해야 하는 필수 서류들(예: 사업자등록증명, 사업자등록증, 법인등기부등본, 표준재무제표증명, 재무제표, 부가가치세과세표준증명원, 국세 완납증명, 지방세 완납증명, 지방세 납세증명, 사업계획서 등)에 해당하는 서류들을 쉼표로 구분하여 나열해 주세요. 정보가 없으면 "확인 필요"라고 적어주세요.
 
 반드시 아래 양식 그대로 정확히 두 줄만 답변해 주세요. 다른 사족은 절대 포함하지 마세요.
 
@@ -109,34 +110,29 @@ def analyze_with_groq(full_text):
 필수서류: [내용 작성]
 
 [공고문 내용]
-{full_text[:7000]}
-                        """
-                    }
-                ],
-                temperature=0.1,
-                max_tokens=300,
-            )
-            
-            text_resp = completion.choices[0].message.content.strip()
-            
-            scale_result = "지원 규모 정보 확인 필요"
-            docs_result = "필수 서류 확인 필요"
-            
-            for line in text_resp.split('\n'):
-                if "지원규모:" in line or "모집규모:" in line:
-                    scale_result = line.split(":", 1)[1].strip()
-                elif "필수서류:" in line:
-                    docs_result = line.split(":", 1)[1].strip()
-                    
-            return scale_result, docs_result
-        except Exception as e:
-            print(f"⚠️ Groq API 분석 중 오류 (시도 {attempt}/{max_retries}): {str(e)}")
-            if attempt < max_retries:
-                time.sleep(3)
-            else:
-                break
+{full_text[:4000]}
+                    """
+                }
+            ],
+            temperature=0.1,
+            max_tokens=250,
+        )
+        
+        text_resp = completion.choices[0].message.content.strip()
+        
+        scale_result = "지원 규모 정보 확인 필요"
+        docs_result = "필수 서류 확인 필요"
+        
+        for line in text_resp.split('\n'):
+            if "지원규모:" in line or "모집규모:" in line:
+                scale_result = line.split(":", 1)[1].strip()
+            elif "필수서류:" in line:
+                docs_result = line.split(":", 1)[1].strip()
                 
-    return "지원 규모 정보 확인 필요", "필수 서류 확인 필요"
+        return scale_result, docs_result
+    except Exception as e:
+        print(f"⚠️ OpenRouter API 분석 중 오류: {str(e)}")
+        return "지원 규모 정보 확인 필요", "필수 서류 확인 필요"
 
 def analyze_and_build_html(items):
     rows_html = ""
@@ -163,16 +159,15 @@ def analyze_and_build_html(items):
             continue
 
         valid_count += 1
-        print(f"🤖 [Groq AI 분석 중 ({valid_count})] '{title}'...")
+        print(f"🤖 [OpenRouter AI 분석 중 ({valid_count})] '{title}'...")
         
-        parsed_scale, parsed_docs = analyze_with_groq(full_text)
+        parsed_scale, parsed_docs = analyze_with_openrouter(full_text)
         time.sleep(0.5)
 
         target_type = "👤 개인" if ("개인" in full_text and "기업" not in full_text) else "🏢 기업"
         email_str = ", ".join(emails) if emails else ""
         email_html = "<br>".join([f"📧 {e}" for e in emails]) if emails else "-"
         
-        # ⚡ 원클릭 메일 제안 버튼 (여러 이메일이 있을 경우 하나의 버튼으로 통합)
         if len(emails) > 0:
             to_emails = emails[0]
             cc_emails = ",".join(emails[1:]) if len(emails) > 1 else ""
@@ -189,7 +184,6 @@ def analyze_and_build_html(items):
         phones = PHONE_PATTERN.findall(full_text)
         contact_html = f"📞 {phones[0]}" if phones else (ref_name if ref_name else "-")
 
-        # 엑셀(CSV) 다운로드를 위해 텍스트 정제 (따옴표 및 줄바꿈 제거)
         safe_title = title.replace('"', '""').replace('\n', ' ')
         safe_org = exec_org.replace('"', '""')
         safe_scale = parsed_scale.replace('"', '""')
@@ -231,7 +225,7 @@ def analyze_and_build_html(items):
                     alert("다운로드할 데이터가 없습니다.");
                     return;
                 }}
-                let csvContent = "\\uFEFF"; // UTF-8 BOM (엑셀 한글 깨짐 방지)
+                let csvContent = "\\uFEFF";
                 csvContent += "구분,공고명,지원규모,수행기관,신청기간,신청방법,이메일,필수서류\\n";
                 
                 rows.forEach(function(row) {{
@@ -263,10 +257,10 @@ def analyze_and_build_html(items):
     <body style="font-family:'Malgun Gothic', sans-serif; color:#333;">
         <div style="max-width:1700px; margin:0 auto; padding:20px;">
             <div style="display:flex; justify-content:space-between; align-items:center;">
-                <h2 style="color:#004aad; margin:0;">📊 B2G 이메일 접수 공고 & Groq AI 분석 대시보드</h2>
+                <h2 style="color:#004aad; margin:0;">📊 B2G 이메일 접수 공고 & OpenRouter AI 분석 대시보드</h2>
                 <button onclick="downloadCSV()" style="background:#137333; color:white; border:none; padding:10px 16px; border-radius:6px; font-weight:bold; cursor:pointer; font-size:13px;">📥 대시보드 엑셀(CSV) 다운로드</button>
             </div>
-            <p style="margin-top:10px;">이메일 접수가 가능한 알짜배기 공고 총 <b>{valid_count}건</b>의 원문 파일을 Groq AI가 정밀 분석하여 규모와 필수 서류를 칸별로 분리 추출했습니다.</p>
+            <p style="margin-top:10px;">이메일 접수가 가능한 알짜배기 공고 총 <b>{valid_count}건</b>의 원문 분석 리포트입니다.</p>
             <table style="width:100%; border-collapse:collapse; margin-top:15px; background:#fff;">
                 <thead>
                     <tr style="background-color:#f8fafc; color:#444; font-size:12px;">
@@ -305,7 +299,7 @@ def send_email(html_body):
     receivers = [email.strip() for email in receiver_list.split(",")]
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = "📊 [B2G Groq AI 대시보드] 이메일 접수 공고별 규모 및 필수 서류 분석 결과"
+    msg["Subject"] = "📊 [B2G OpenRouter AI 대시보드] 이메일 접수 공고별 규모 및 필수 서류 분석 결과"
     msg["From"] = sender_email
     msg["To"] = ", ".join(receivers)
     
