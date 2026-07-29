@@ -9,30 +9,19 @@ import requests
 from bs4 import BeautifulSoup
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+import google.generativeai as genai
 
 # 제공해주신 기업마당 API 정보
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
 CRTFC_KEY = "4vc2gy"
 
-# 정규식 패턴 정의
+# Gemini API 설정 (깃허브 Secrets의 GEMINI_API_KEY 연동)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+
 EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 PHONE_PATTERN = re.compile(r"0\d{1,2}-\d{3,4}-\d{4}")
-
-# 🔍 사용자님이 지정해주신 필수 제안 서류 리스트
-TARGET_DOCUMENTS = [
-    "사업자등록증명", 
-    "사업자등록증", 
-    "법인등기부등본", 
-    "표준재무제표증명", 
-    "부가가치세과세표준증명", 
-    "납세증명", 
-    "국세 납부증명서", 
-    "지방세 납부증명서",
-    "사업신청서",
-    "사업계획서",
-    "동의서",
-    "확약서"
-]
 
 def fetch_bizinfo_notices():
     target_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=50"
@@ -58,38 +47,59 @@ def fetch_bizinfo_notices():
                 items = data.get("jsonArray") or data.get("item") or data.get("items") or []
                 print(f"🎯 [수집 성공] 총 {len(items)}건의 공고를 불러왔습니다.")
                 return items
-            else:
-                print(f"❌ [API 응답 오류]: 상태 코드 {response.status}")
     except Exception as e:
         print(f"❌ [연결 에러]: {str(e)}")
     return []
 
-def crawl_detail_page(url):
+def crawl_detail_text(url):
+    """상세 페이지의 본문 텍스트를 깨끗하게 긁어옵니다."""
     if not url or url == "#":
-        return "상세 링크 없음", "공고문 참조"
-    
+        return ""
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         res = requests.get(url, headers=headers, timeout=5)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
-            full_text = re.sub(r'\s+', ' ', soup.get_text()).strip()
-            
-            # 모집규모 자동 파싱
-            scale_text = "공고문 참조"
-            match1 = re.search(r"(모집규모|사업규모|지원규모|선정규모|모집인원)[:\s]*([^.]{2,40}?(?:내외|개사|개소|업체|명|개 기업|개 과제))", full_text)
-            if match1:
-                scale_text = match1.group(0).strip()
-            else:
-                match2 = re.search(r"([^.]{0,15}\d+\s*(?:개사|개소|업체|내외|명|개 기업)[^.]{0,15})", full_text)
-                if match2:
-                    scale_text = match2.group(1).strip()
-                    
-            return full_text, scale_text
+            return re.sub(r'\s+', ' ', soup.get_text()).strip()
     except Exception:
         pass
+    return ""
+
+def analyze_with_gemini(full_text):
+    """Gemini AI를 이용해 모집규모와 필수 서류를 정확하게 요약합니다."""
+    if not GEMINI_API_KEY:
+        return "모집규모: 공고문 참조", "필수 서류: 공고문 참조"
     
-    return "", "공고문 참조"
+    try:
+        # 무료 모델 중 빠르고 가벼운 gemini-1.5-flash 활용
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        prompt = f"""
+        다음 지원사업 공고문 내용을 분석하여 정확히 아래 형식으로 두 줄만 답변해 주세요. 다른 사족은 절대 쓰지 마세요.
+        
+        [공고문 내용]
+        {full_text[:4000]}
+        
+        [출력 형식]
+        모집규모: (예: 5개사 내외, 10개 업체 등 명확하게 요약. 없으면 공고문 참조)
+        필수서류: (예: 사업자등록증명, 납세증명서, 사업계획서 등 제출해야 하는 서류들을 쉼표로 구분하여 나열. 없으면 공고문 참조)
+        """
+        
+        response = model.generate_content(prompt)
+        result_lines = response.text.strip().split('\n')
+        
+        scale_result = "모집규모: 공고문 참조"
+        docs_result = "필수서류: 공고문 참조"
+        
+        for line in result_lines:
+            if "모집규모:" in line:
+                scale_result = line.strip()
+            elif "필수서류:" in line:
+                docs_result = line.strip()
+                
+        return scale_result.replace("모집규모:", "").strip(), docs_result.replace("필수서류:", "").strip()
+    except Exception as e:
+        print(f"⚠️ Gemini AI 분석 중 오류 발생: {str(e)}")
+        return "공고문 참조", "공고문 참조"
 
 def analyze_and_build_html(items):
     rows_html = ""
@@ -104,37 +114,33 @@ def analyze_and_build_html(items):
         ref_name = item.get("refrncNm", "")
         original_method = item.get("reqstMthDscd") or item.get("reqstMthCn") or item.get("reqstMthPapersCn") or item.get("rcivMth") or "공고문 참조"
         
-        detail_text, parsed_scale = crawl_detail_page(link)
+        detail_text = crawl_detail_text(link)
         full_text = f"{summary} {ref_name} {original_method} {detail_text}"
 
-        # 🔍 이메일 접수 건인지 강력하게 판정 (이메일 주소가 있거나 신청방법에 이메일/전자우편 포함된 경우)
+        # 🔍 이메일 접수 건 필터링
         raw_emails = EMAIL_PATTERN.findall(full_text)
         emails = list(set(raw_emails))
-        
         is_email_apply = "이메일" in original_method or "전자우편" in original_method or len(emails) > 0
         
-        # 🚨 이메일 접수가 아닌 공고는 과감히 스킵하여 알짜배기만 남김
         if not is_email_apply:
             continue
 
         valid_count += 1
+        print(f"🤖 [AI 분석 중] '{title}' 공고 분석 중...")
+        
+        # 🧠 이메일 접수 공고만 선별하여 Gemini AI 분석 수행
+        parsed_scale, parsed_docs = analyze_with_gemini(full_text)
+
         target_type = "👤 개인" if ("개인" in full_text and "기업" not in full_text) else "🏢 기업"
-
-        # 지정 서류 매칭 검사
-        found_docs = []
-        for doc in TARGET_DOCUMENTS:
-            if doc in full_text and doc not in found_docs:
-                found_docs.append(doc)
-
         email_html = "<br>".join([f"📧 {e}" for e in emails]) if emails else "-"
         
-        # 원클릭 제안 버튼 생성 (이메일 주소가 있으면 바로 메일 쏠 수 있도록 세팅)
         if len(emails) > 0:
             one_click_html = "<br>".join([f'<a href="mailto:{e}" style="background:#e6f4ea; color:#137333; padding:6px 10px; border-radius:4px; font-size:11px; font-weight:bold; text-decoration:none; display:inline-block; margin:2px 0;">⚡ 원클릭 메일 제안</a>' for e in emails])
         else:
             one_click_html = '<span style="color:#137333; font-weight:bold; font-size:11px;">이메일 접수</span>'
 
-        docs_html = ", ".join([f'<span style="color:#c5221f; font-weight:bold;">{d}</span>' for d in found_docs]) if found_docs else "공고문 참조"
+        docs_html = f'<span style="color:#c5221f; font-weight:bold;">{parsed_docs}</span>'
+        scale_html = f'<span style="color:#004aad; font-weight:bold;">📌 {parsed_scale}</span>'
         
         phones = PHONE_PATTERN.findall(full_text)
         contact_html = f"📞 {phones[0]}" if phones else (ref_name if ref_name else "-")
@@ -142,7 +148,7 @@ def analyze_and_build_html(items):
         rows_html += f"""
         <tr>
             <td style="padding:10px; border-bottom:1px solid #eee; text-align:center; font-size:11px;">{target_type}</td>
-            <td style="padding:10px; border-bottom:1px solid #eee; font-weight:bold;">{title}<br><span style="color:#004aad; font-size:11px; font-weight:normal;">📌 {parsed_scale}</span></td>
+            <td style="padding:10px; border-bottom:1px solid #eee; font-weight:bold;">{title}<br>{scale_html}</td>
             <td style="padding:10px; border-bottom:1px solid #eee; color:#555;">{exec_org}</td>
             <td style="padding:10px; border-bottom:1px solid #eee; font-size:12px;">{period}</td>
             <td style="padding:10px; border-bottom:1px solid #eee; font-size:12px;">{original_method}</td>
@@ -167,19 +173,19 @@ def analyze_and_build_html(items):
     <head><meta charset="utf-8"></head>
     <body style="font-family:'Malgun Gothic', sans-serif; color:#333;">
         <div style="max-width:1500px; margin:0 auto; padding:20px;">
-            <h2 style="color:#004aad;">📊 B2G 이메일 접수 전용 원클릭 제안 리포트</h2>
-            <p>실시간 수집된 공고 중, 원클릭 메일 제안이 가능한 알짜배기 공고 총 {valid_count}건이 추출되었습니다.</p>
+            <h2 style="color:#004aad;">📊 B2G 이메일 접수 전용 AI 맞춤형 분석 리포트</h2>
+            <p>이메일 접수가 가능한 알짜배기 공고 총 {valid_count}건을 Gemini AI가 분석·요약하였습니다.</p>
             <table style="width:100%; border-collapse:collapse; margin-top:15px;">
                 <thead>
                     <tr style="background-color:#f8fafc; color:#444; font-size:12px;">
                         <th style="padding:10px; border-bottom:2px solid #ddd;">구분</th>
-                        <th style="padding:10px; border-bottom:2px solid #ddd;">공고명 및 자동 파싱(모집규모)</th>
+                        <th style="padding:10px; border-bottom:2px solid #ddd;">공고명 및 AI 분석(모집규모)</th>
                         <th style="padding:10px; border-bottom:2px solid #ddd;">사업수행기관</th>
                         <th style="padding:10px; border-bottom:2px solid #ddd;">신청기간</th>
-                        <th style="padding:10px; border-bottom:2px solid #ddd;">신청방법 (원본 상세)</th>
+                        <th style="padding:10px; border-bottom:2px solid #ddd;">신청방법</th>
                         <th style="padding:10px; border-bottom:2px solid #ddd;">원클릭 메일 제안</th>
                         <th style="padding:10px; border-bottom:2px solid #ddd;">접수 이메일</th>
-                        <th style="padding:10px; border-bottom:2px solid #ddd;">감지된 필수/증빙 서류</th>
+                        <th style="padding:10px; border-bottom:2px solid #ddd;">AI 분석 필수 서류</th>
                         <th style="padding:10px; border-bottom:2px solid #ddd;">담당 문의처</th>
                         <th style="padding:10px; border-bottom:2px solid #ddd;">바로가기</th>
                     </tr>
@@ -206,7 +212,7 @@ def send_email(html_body):
     receivers = [email.strip() for email in receiver_list.split(",")]
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = "📊 [이메일 접수 전용] B2G 원클릭 제안 맞춤형 리포트"
+    msg["Subject"] = "📊 [AI 맞춤 리포트] 이메일 접수 B2G 공고 분석 결과"
     msg["From"] = sender_email
     msg["To"] = ", ".join(receivers)
     
@@ -218,7 +224,7 @@ def send_email(html_body):
         server.login(sender_email, sender_password)
         server.sendmail(sender_email, receivers, msg.as_string())
         server.quit()
-        print(f"🎉 [이메일 전송 성공] 다음 수신자에게 메일이 발송되었습니다: {receivers}")
+        print(f"🎉 [이메일 전송 성공] 수신자: {receivers}")
     except Exception as e:
         print(f"❌ [이메일 전송 실패]: {str(e)}")
 
@@ -229,4 +235,3 @@ if __name__ == "__main__":
         send_email(html_report)
     else:
         print("❌ 공고 데이터를 가져오지 못해 작업을 종료합니다.")
-
