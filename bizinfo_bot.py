@@ -41,7 +41,6 @@ def fetch_bizinfo_notices():
         }
     )
 
-    # 🔄 타임아웃 발생 시 최대 3번까지 재시도하는 로직 추가
     max_retries = 3
     for attempt in range(1, max_retries + 1):
         try:
@@ -56,7 +55,6 @@ def fetch_bizinfo_notices():
         except Exception as e:
             print(f"⚠️ [연결 경고 (시도 {attempt})]: {str(e)}")
             if attempt < max_retries:
-                print("⏳ 3초 후 재시도합니다...")
                 time.sleep(3)
             else:
                 print("❌ [최종 실패] API 연결에 실패했습니다.")
@@ -72,48 +70,53 @@ def extract_text_from_pdf_url(pdf_url):
             pdf_file = io.BytesIO(res.content)
             reader = PdfReader(pdf_file)
             extracted_text = ""
-            for page in reader.pages[:5]:
+            for page in reader.pages[:6]: # 앞쪽 6페이지까지 넉넉하게 추출
                 text = page.extract_text()
                 if text:
                     extracted_text += text + "\n"
             return extracted_text.strip()
     except Exception as e:
-        print(f"⚠️ PDF 다운로드 및 파싱 중 오류: {str(e)}")
+        print(f"⚠️ PDF 파싱 중 오류: {str(e)}")
     return ""
 
 def analyze_with_gemini(full_text):
+    """Gemini AI가 공고문을 분석하여 규모와 필수 서류를 무조건 도출하도록 유도합니다."""
     if not GEMINI_API_KEY or not full_text:
-        return "공고문 참조", "공고문 참조"
+        return "지원 규모 정보 확인 필요", "필수 서류 확인 필요"
     
     try:
         model = genai.GenerativeModel('gemini-2.5-flash')
         prompt = f"""
-        다음 지원사업 공식 공고문 원본 내용을 분석하여 정확히 아래 형식으로 두 줄만 답변해 주세요. 다른 사족은 절대 쓰지 마세요.
+        다음 지원사업 공고문 내용을 분석하여 아래 두 가지 항목을 명확하게 파악해 주세요.
         
-        [공고문 원본 내용]
-        {full_text[:6000]}
+        1. 지원규모: 선정하는 기업(개사/개소) 수, 지원 예산이나 금액 등이 있다면 포함하여 구체적으로 작성해 주세요. (예: 10개사 내외, 총 5천만원 지원 등)
+        2. 필수서류: 제출해야 하는 필수 서류들(예: 사업자등록증명, 국세/지방세 납세증명서, 표준재무제표증명, 사업계획서 등)을 쉼표로 구분하여 구체적으로 나열해 주세요.
         
-        [출력 형식]
-        모집규모: (예: 5개사 내외, 10개 업체 등 명확하게 요약. 없으면 공고문 참조)
-        필수서류: (예: 사업자등록증명, 납세증명서, 사업계획서, 표준재무제표증명 등 제출해야 하는 서류들을 쉼표로 구분하여 나열. 없으면 공고문 참조)
+        반드시 아래 양식 그대로 정확히 두 줄만 답변해 주세요. 다른 사족은 절대 포함하지 마세요.
+        
+        지원규모: [내용 작성]
+        필수서류: [내용 작성]
+        
+        [공고문 내용]
+        {full_text[:7000]}
         """
         
         response = model.generate_content(prompt)
-        result_lines = response.text.strip().split('\n')
+        text_resp = response.text.strip()
         
-        scale_result = "모집규모: 공고문 참조"
-        docs_result = "필수서류: 공고문 참조"
+        scale_result = "지원 규모 정보 확인 필요"
+        docs_result = "필수 서류 확인 필요"
         
-        for line in result_lines:
-            if "모집규모:" in line:
-                scale_result = line.strip()
+        for line in text_resp.split('\n'):
+            if "지원규모:" in line or "모집규모:" in line:
+                scale_result = line.split(":", 1)[1].strip()
             elif "필수서류:" in line:
-                docs_result = line.strip()
+                docs_result = line.split(":", 1)[1].strip()
                 
-        return scale_result.replace("모집규모:", "").strip(), docs_result.replace("필수서류:", "").strip()
+        return scale_result, docs_result
     except Exception as e:
-        print(f"⚠️ Gemini AI 분석 중 오류 발생: {str(e)}")
-        return "공고문 참조", "공고문 참조"
+        print(f"⚠️ Gemini AI 분석 중 오류: {str(e)}")
+        return "지원 규모 정보 확인 필요", "필수 서류 확인 필요"
 
 def analyze_and_build_html(items):
     rows_html = ""
@@ -129,11 +132,10 @@ def analyze_and_build_html(items):
         original_method = item.get("reqstMthDscd") or item.get("reqstMthCn") or item.get("reqstMthPapersCn") or item.get("rcivMth") or "공고문 참조"
         
         pdf_url = item.get("printFlpthNm", "")
-        pdf_filename = item.get("printFileNm", "")
-        
         pdf_text = extract_text_from_pdf_url(pdf_url)
         full_text = f"{summary} {ref_name} {original_method} {pdf_text}"
 
+        # 이메일 접수 건 필터링
         raw_emails = EMAIL_PATTERN.findall(full_text)
         emails = list(set(raw_emails))
         is_email_apply = "이메일" in original_method or "전자우편" in original_method or len(emails) > 0
@@ -142,8 +144,9 @@ def analyze_and_build_html(items):
             continue
 
         valid_count += 1
-        print(f"🤖 [AI 원본 파일 분석 중] '{title}'...")
+        print(f"🤖 [AI 원본 분석 중] '{title}'...")
         
+        # 🧠 AI 분석 수행 (규모 및 필수서류 도출)
         parsed_scale, parsed_docs = analyze_with_gemini(full_text)
 
         target_type = "👤 개인" if ("개인" in full_text and "기업" not in full_text) else "🏢 기업"
@@ -154,26 +157,25 @@ def analyze_and_build_html(items):
         else:
             one_click_html = '<span style="color:#137333; font-weight:bold; font-size:11px;">이메일 접수</span>'
 
-        docs_html = f'<span style="color:#c5221f; font-weight:bold;">{parsed_docs}</span>'
-        scale_html = f'<span style="color:#004aad; font-weight:bold;">📌 {parsed_scale}</span>'
+        # 대시보드 표에 AI가 분석한 내용이 선명하게 보이도록 구성
+        scale_html = f'<div style="background:#f1f3f4; padding:5px 8px; border-radius:4px; margin-top:4px; color:#1a73e8; font-size:11px; font-weight:bold;">📌 지원규모: {parsed_scale}</div>'
+        docs_html = f'<div style="color:#c5221f; font-weight:bold; font-size:11px; background:#fdf2f2; padding:6px; border-radius:4px;">📋 {parsed_docs}</div>'
         
         phones = PHONE_PATTERN.findall(full_text)
         contact_html = f"📞 {phones[0]}" if phones else (ref_name if ref_name else "-")
 
-        pdf_link_html = f'<br><a href="{pdf_url}" target="_blank" style="color:#d93025; font-size:11px; font-weight:bold;">📄 원본 PDF: {pdf_filename}</a>' if pdf_url else ""
-
         rows_html += f"""
         <tr>
-            <td style="padding:10px; border-bottom:1px solid #eee; text-align:center; font-size:11px;">{target_type}</td>
-            <td style="padding:10px; border-bottom:1px solid #eee; font-weight:bold;">{title}{pdf_link_html}<br>{scale_html}</td>
-            <td style="padding:10px; border-bottom:1px solid #eee; color:#555;">{exec_org}</td>
-            <td style="padding:10px; border-bottom:1px solid #eee; font-size:12px;">{period}</td>
-            <td style="padding:10px; border-bottom:1px solid #eee; font-size:12px;">{original_method}</td>
-            <td style="padding:10px; border-bottom:1px solid #eee; text-align:center;">{one_click_html}</td>
-            <td style="padding:10px; border-bottom:1px solid #eee; font-size:12px;">{email_html}</td>
-            <td style="padding:10px; border-bottom:1px solid #eee; font-size:11px;">{docs_html}</td>
-            <td style="padding:10px; border-bottom:1px solid #eee; font-size:11px;">{contact_html}</td>
-            <td style="padding:10px; border-bottom:1px solid #eee; text-align:center;"><a href="{link}" target="_blank" style="background:#004aad; color:white; padding:5px 8px; text-decoration:none; border-radius:4px; font-size:11px;">보기</a></td>
+            <td style="padding:12px; border-bottom:1px solid #eee; text-align:center; font-size:11px;">{target_type}</td>
+            <td style="padding:12px; border-bottom:1px solid #eee; font-weight:bold;">{title}{scale_html}</td>
+            <td style="padding:12px; border-bottom:1px solid #eee; color:#555;">{exec_org}</td>
+            <td style="padding:12px; border-bottom:1px solid #eee; font-size:12px;">{period}</td>
+            <td style="padding:12px; border-bottom:1px solid #eee; font-size:12px;">{original_method}</td>
+            <td style="padding:12px; border-bottom:1px solid #eee; text-align:center;">{one_click_html}</td>
+            <td style="padding:12px; border-bottom:1px solid #eee; font-size:12px;">{email_html}</td>
+            <td style="padding:12px; border-bottom:1px solid #eee;">{docs_html}</td>
+            <td style="padding:12px; border-bottom:1px solid #eee; font-size:11px;">{contact_html}</td>
+            <td style="padding:12px; border-bottom:1px solid #eee; text-align:center;"><a href="{link}" target="_blank" style="background:#004aad; color:white; padding:6px 10px; text-decoration:none; border-radius:4px; font-size:11px;">보기</a></td>
         </tr>
         """
 
@@ -189,22 +191,22 @@ def analyze_and_build_html(items):
     <html>
     <head><meta charset="utf-8"></head>
     <body style="font-family:'Malgun Gothic', sans-serif; color:#333;">
-        <div style="max-width:1500px; margin:0 auto; padding:20px;">
-            <h2 style="color:#004aad;">📊 B2G 이메일 접수 전용 PDF 원본 AI 분석 리포트</h2>
-            <p>이메일 접수 공고 총 {valid_count}건의 공식 PDF 원본을 Gemini AI가 정밀 분석하였습니다.</p>
-            <table style="width:100%; border-collapse:collapse; margin-top:15px;">
+        <div style="max-width:1600px; margin:0 auto; padding:20px;">
+            <h2 style="color:#004aad;">📊 B2G 이메일 접수 공고 & AI 분석 대시보드</h2>
+            <p>이메일 접수가 가능한 알짜배기 공고 총 <b>{valid_count}건</b>의 원문 파일을 Gemini AI가 정밀 분석하여 규모와 필수 서류를 추출했습니다.</p>
+            <table style="width:100%; border-collapse:collapse; margin-top:15px; background:#fff;">
                 <thead>
                     <tr style="background-color:#f8fafc; color:#444; font-size:12px;">
-                        <th style="padding:10px; border-bottom:2px solid #ddd;">구분</th>
-                        <th style="padding:10px; border-bottom:2px solid #ddd;">공고명 및 PDF 원본 AI 분석(규모)</th>
-                        <th style="padding:10px; border-bottom:2px solid #ddd;">사업수행기관</th>
-                        <th style="padding:10px; border-bottom:2px solid #ddd;">신청기간</th>
-                        <th style="padding:10px; border-bottom:2px solid #ddd;">신청방법</th>
-                        <th style="padding:10px; border-bottom:2px solid #ddd;">원클릭 메일 제안</th>
-                        <th style="padding:10px; border-bottom:2px solid #ddd;">접수 이메일</th>
-                        <th style="padding:10px; border-bottom:2px solid #ddd;">AI 분석 필수 서류</th>
-                        <th style="padding:10px; border-bottom:2px solid #ddd;">담당 문의처</th>
-                        <th style="padding:10px; border-bottom:2px solid #ddd;">바로가기</th>
+                        <th style="padding:12px; border-bottom:2px solid #ddd;">구분</th>
+                        <th style="padding:12px; border-bottom:2px solid #ddd; width:22%;">공고명 및 AI 분석(지원규모)</th>
+                        <th style="padding:12px; border-bottom:2px solid #ddd;">사업수행기관</th>
+                        <th style="padding:12px; border-bottom:2px solid #ddd;">신청기간</th>
+                        <th style="padding:12px; border-bottom:2px solid #ddd;">신청방법</th>
+                        <th style="padding:12px; border-bottom:2px solid #ddd;">원클릭 메일 제안</th>
+                        <th style="padding:12px; border-bottom:2px solid #ddd;">접수 이메일</th>
+                        <th style="padding:12px; border-bottom:2px solid #ddd; width:22%;">🤖 AI 분석 필수 서류</th>
+                        <th style="padding:12px; border-bottom:2px solid #ddd;">담당 문의처</th>
+                        <th style="padding:12px; border-bottom:2px solid #ddd;">바로가기</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -229,7 +231,7 @@ def send_email(html_body):
     receivers = [email.strip() for email in receiver_list.split(",")]
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = "📊 [PDF 원본 AI 분석] 이메일 접수 B2G 공고 리포트"
+    msg["Subject"] = "📊 [B2G AI 대시보드] 이메일 접수 공고별 규모 및 필수 서류 분석 결과"
     msg["From"] = sender_email
     msg["To"] = ", ".join(receivers)
     
