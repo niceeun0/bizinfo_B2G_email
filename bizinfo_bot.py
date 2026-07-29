@@ -20,11 +20,30 @@ PHONE_PATTERN = re.compile(r"0\d{1,2}-\d{3,4}-\d{4}")
 DOC_KEYWORDS = ["사업자등록증", "재무제표", "신용평가", "인감증명서", "법인등기", "주주명부", "국세완납", "지방세완납", "견적서", "소개서", "이력서", "신청서"]
 
 def fetch_bizinfo_notices():
-    params = {
-        "crtfcKey": CRTFC_KEY,
-        "dataType": "json",
-        "searchCnt": "50"
+    # 💡 직접 접속 대신 무료 CORS/API 프록시 우회 주소 활용
+    target_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=50"
+    proxy_url = f"https://api.allorigins.win/get?url={requests.utils.quote(target_url)}"
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
     }
+    
+    try:
+        print("⏳ [수집 시작] 퍼블릭 프록시 서버를 통해 우회 접속 중...")
+        resp = requests.get(proxy_url, headers=headers, timeout=30)
+        if resp.status_code == 200:
+            import json
+            res_data = resp.json()
+            # allorigins 프록시는 내용을 'contents' 안에 담아줍니다.
+            actual_data = json.loads(res_data.get("contents", "{}"))
+            items = actual_data.get("jsonArray") or actual_data.get("item") or actual_data.get("items") or []
+            print(f"🎯 [수집 성공] 총 {len(items)}건의 공고를 가져왔습니다.")
+            return items
+        else:
+            print(f"❌ [프록시 응답 오류]: 상태 코드 {resp.status_code}")
+    except Exception as e:
+        print(f"❌ [우회 접속 에러]: {str(e)}")
+    return []
     
     # 💡 일반 브라우저처럼 보이도록 헤더를 완벽하게 강화
     headers = {
