@@ -13,25 +13,20 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# API 및 환경 변수 설정
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
 CRTFC_KEY = "4vc2gy"
 
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 
-# =====================================================================
-# 💡 이메일 설정 부분 (여기를 대표님 환경에 맞게 수정해 주세요!)
-# =====================================================================
-SENDER_EMAIL = "niceeun095@gmail.com"  
+SENDER_EMAIL = "niceeun095@gmail.com"  
 SENDER_PASSWORD = os.environ.get("EMAIL_PASS")
 
 RECEIVER_EMAILS = [
-    "s_e_y_0615@naver.com", 
-    "eyson0615@gmail.com",
+    "niceeun095@gmail.com",
+    "s_e_y_0615@naver.com",
     "eyson0615@nice.co.kr"
 ]
-# =====================================================================
 
 CORP_KEYWORDS = ["중소기업", "기업", "법인", "사업자", "컨소시엄", "주관기관", "벤처", "소상공인"]
 INDIVIDUAL_KEYWORDS = ["개인", "일반국민", "청년", "구직자", "학생", "개인사업자 제외"]
@@ -43,7 +38,6 @@ PHONE_PATTERN = re.compile(r"0\d{1,2}-\d{3,4}-\d{4}")
 def fetch_bizinfo_notices():
     req_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=10&pageIndex=1"
     
-    # 💡 기업마당 방화벽이 일반 크롬 브라우저로 완벽히 오인하도록 헤더를 강화했습니다.
     headers = {
         "Host": "www.bizinfo.go.kr",
         "Connection": "keep-alive",
@@ -58,7 +52,6 @@ def fetch_bizinfo_notices():
     
     try:
         print("⏳ 방화벽 우회 접속을 시도합니다...")
-        # 💡 세션(Session) 객체를 사용하여 실제 브라우저처럼 쿠키와 연결을 유지합니다.
         session = requests.Session()
         resp = session.get(req_url, headers=headers, timeout=25, verify=False)
         print(f"✅ 서버 응답 상태 코드: {resp.status_code}")
