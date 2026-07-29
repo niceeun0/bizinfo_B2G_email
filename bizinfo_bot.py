@@ -23,12 +23,12 @@ SMTP_PORT = 587
 # =====================================================================
 # 💡 이메일 설정 부분 (여기를 대표님 환경에 맞게 수정해 주세요!)
 # =====================================================================
-SENDER_EMAIL = "발송할_내메일@gmail.com"  
+SENDER_EMAIL = "niceeun095@gmail.com"  
 SENDER_PASSWORD = os.environ.get("EMAIL_PASS")
 
 RECEIVER_EMAILS = [
-    "첫번째사람@naver.com", 
-    "두번째사람@gmail.com"
+    "s_e_y_0615@naver.com", 
+    "eyson0615@gmail.com","eyson0615@nice.co.kr"
 ]
 # =====================================================================
 
@@ -40,16 +40,22 @@ EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 PHONE_PATTERN = re.compile(r"0\d{1,2}-\d{3,4}-\d{4}")
 
 def fetch_bizinfo_notices():
-    # 💡 브라우저 검증이 완료된 가장 확실한 주소 호출 방식 (searchCnt=10)
-    req_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=10&pageIndex=1"
+    # 💡 깃허브 서버 환경 변조를 원천 차단하는 표준 파라미터 객체 방식
+    params = {
+        "crtfcKey": CRTFC_KEY,
+        "dataType": "json",
+        "searchCnt": "10",
+        "pageIndex": "1"
+    }
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*"
     }
     
     try:
-        print("⏳ 브라우저 검증 완료된 주소로 API를 호출합니다...")
-        resp = requests.get(req_url, headers=headers, timeout=15, verify=False)
+        print("⏳ API 서버와 안전한 통신 규격으로 연결을 시도합니다...")
+        resp = requests.get(BIZINFO_API_URL, params=params, headers=headers, timeout=15, verify=False)
         print(f"✅ 서버 응답 상태 코드: {resp.status_code}")
         
         if resp.status_code == 200:
