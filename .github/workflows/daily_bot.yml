@@ -1,9 +1,9 @@
-name: Bizinfo Bot
+name: Daily Bizinfo Bot
 
 on:
   schedule:
-    - cron: '0 23 * * *' # 매일 밤 11시(UTC) 실행 등 원하시는 스케줄
-  workflow_dispatch: # 수동 실행 버튼
+    - cron: '0 23 * * *'
+  workflow_dispatch:
 
 jobs:
   run-bot:
@@ -24,7 +24,6 @@ jobs:
       - name: Run script
         run: python bizinfo_bot.py
         env:
-          # 💡 깃허브 Secrets에 등록한 이름과 아래 환경변수 이름을 정확히 매칭해 주어야 합니다!
           MAIL_USER: ${{ secrets.MAIL_USER }}
           MAIL_PASS: ${{ secrets.MAIL_PASS }}
           MAIL_RECEIVER: ${{ secrets.MAIL_RECEIVER }}
