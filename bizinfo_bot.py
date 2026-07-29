@@ -43,15 +43,32 @@ EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 PHONE_PATTERN = re.compile(r"0\d{1,2}-\d{3,4}-\d{4}")
 
 def fetch_bizinfo_notices():
-    # searchCnt: "100" (최근 100건을 가져옵니다)
+    # 💡 1. 봇 차단을 피하기 위해 일반 크롬 브라우저인 것처럼 위장
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     params = {"crtfcKey": CRTFC_KEY, "dataType": "json", "searchCnt": "100", "pageIndex": "1"}
+    
     try:
-        resp = requests.get(BIZINFO_API_URL, params=params, timeout=15, verify=False)
+        print("⏳ 기업마당 API 서버에 요청을 보냅니다...")
+        resp = requests.get(BIZINFO_API_URL, params=params, headers=headers, timeout=15, verify=False)
+        print(f"✅ 서버 응답 상태 코드: {resp.status_code}")
+        
+        # 💡 2. 서버가 뭐라고 답변했는지 원본 텍스트 앞부분을 강제로 출력
+        print(f"📦 서버 응답 데이터(미리보기):\n{resp.text[:500]}")
+        
         if resp.status_code == 200:
-            data = resp.json()
-            return data.get("jsonArray", []) or data.get("item", [])
+            try:
+                data = resp.json()
+                items = data.get("jsonArray") or data.get("item") or data.get("items") or []
+                print(f"🎯 정상 파싱된 공고 개수: {len(items)}개")
+                return items
+            except Exception as json_e:
+                print(f"❌ JSON 변환 에러 (데이터 형식이 다릅니다): {json_e}")
+                return []
     except Exception as e:
-        print(f"API 요청 에러: {e}")
+        print(f"❌ API 요청 중 에러 발생: {e}")
+        
     return []
 
 def process_and_analyze(items):
