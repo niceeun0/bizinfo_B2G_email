@@ -7,18 +7,19 @@ import ssl
 import smtplib
 import io
 import time
+import tempfile
+import zipfile
 from datetime import datetime, timedelta
 import requests
 from bs4 import BeautifulSoup
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from openai import OpenAI
-from pypdf import PdfReader
-import olefile
-import zipfile
-import xml.etree.ElementTree as ET
-from docx import Document
+import urllib3
 import base64
+
+# HTTPS 보안 경고 숨김
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # 기업마당 API 정보
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
@@ -31,12 +32,23 @@ client = OpenAI(
     api_key=API_KEY,
 ) if API_KEY else None
 
+# 문서 파싱 및 OCR 라이브러리 안전 로드
+try: import pdfplumber
+except ImportError: pdfplumber = None
+try: import docx
+except ImportError: docx = None
+try: import olefile
+except ImportError: olefile = None
+try: import pytesseract
+except ImportError: pytesseract = None
+
 EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 PHONE_PATTERN = re.compile(r"0\d{1,2}-\d{3,4}-\d{4}")
+DOC_KEYWORDS = ["사업자등록증", "재무제표", "인감증명서", "주주명부", "법인등기부등본", "신용평가등급", "신용평가서", "기업정보"]
+SUBMIT_KEYWORDS = ["우편", "이메일", "e-mail", "메일", "방문", "직접", "사본", "스캔본"]
 
 def fetch_bizinfo_notices():
     target_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=100"
-    
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
@@ -62,165 +74,111 @@ def fetch_bizinfo_notices():
                     return items
         except Exception as e:
             print(f"⚠️ [연결 경고 (시도 {attempt})]: {str(e)}")
-            if attempt < max_retries:
-                time.sleep(3)
-            else:
-                print("❌ [최종 실패] API 연결에 실패했습니다.")
+            if attempt < max_retries: time.sleep(3)
     return []
 
-def extract_hwp_text(file_bytes):
-    try:
-        f = io.BytesIO(file_bytes)
-        if olefile.isOleFile(f):
-            ole = olefile.OleFileIO(f)
-            if ole.exists('PrvText'):
-                data = ole.openstream('PrvText').read()
-                return data.decode('utf-16le', errors='ignore')
-    except Exception:
-        pass
-    return ""
-
-def extract_hwpx_text(file_bytes):
-    try:
-        f = io.BytesIO(file_bytes)
-        with zipfile.ZipFile(f) as z:
-            text_content = []
-            for filename in z.namelist():
-                if filename.endswith('.xml') and 'contents' in filename:
-                    with z.open(filename) as xml_file:
-                        tree = ET.parse(xml_file)
-                        for elem in tree.iter():
-                            if elem.text:
-                                text_content.append(elem.text)
-            return "\n".join(text_content)
-    except Exception:
-        pass
-    return ""
-
-def extract_docx_text(file_bytes):
-    try:
-        f = io.BytesIO(file_bytes)
-        doc = Document(f)
-        return "\n".join([p.text for p in doc.paragraphs if p.text])
-    except Exception:
-        pass
-    return ""
-
-def extract_pdf_text(file_bytes):
-    try:
-        pdf_file = io.BytesIO(file_bytes)
-        reader = PdfReader(pdf_file)
-        extracted_text = ""
-        for page in reader.pages[:15]:
-            text = page.extract_text()
-            if text:
-                extracted_text += text + "\n"
-        return extracted_text.strip()
-    except Exception:
-        pass
-    return ""
-
-def extract_all_document_text(file_url):
-    if not file_url or not file_url.startswith("http"):
-        return ""
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        res = requests.get(file_url, headers=headers, timeout=8)
-        if res.status_code == 200 and len(res.content) > 500:
-            content = res.content
-            url_lower = file_url.lower()
-            if url_lower.endswith('.pdf') or content.startswith(b'%PDF'):
-                return extract_pdf_text(content)
-            elif url_lower.endswith('.hwpx'):
-                return extract_hwpx_text(content)
-            elif url_lower.endswith('.hwp'):
-                return extract_hwp_text(content)
-            elif url_lower.endswith('.docx') or url_lower.endswith('.doc'):
-                return extract_docx_text(content)
-            else:
-                text = extract_pdf_text(content)
-                if not text: text = extract_hwpx_text(content)
-                if not text: text = extract_docx_text(content)
-                return text
-    except Exception:
-        pass
-    return ""
+def extract_docs_and_contacts(urls: list) -> tuple:
+    if not urls: return "", "", "-", "첨부파일 없음"
+    emails, phones = set(), set()
+    needs_oneclick = False
+    
+    for idx, url in enumerate(urls[:2]):
+        try:
+            resp = requests.get(url, timeout=30, verify=False)
+            if resp.status_code != 200: continue
+            
+            content = resp.content
+            text = ""
+            
+            # PDF 판독 및 OCR
+            if content.startswith(b'%PDF'):
+                if pdfplumber:
+                    try:
+                        with pdfplumber.open(io.BytesIO(content)) as pdf:
+                            pages_to_scan = pdf.pages[:3] + pdf.pages[-3:] if len(pdf.pages) > 6 else pdf.pages
+                            for page in pages_to_scan:
+                                t = page.extract_text()
+                                if t: text += t + "\n"
+                                if pytesseract and (not t or len(t.strip()) < 30):
+                                    try:
+                                        img = page.to_image(resolution=150).original
+                                        text += pytesseract.image_to_string(img, lang='eng+kor') + "\n"
+                                    except Exception: pass
+                    except Exception: pass
+            # DOCX / HWPX 판독
+            elif content.startswith(b'PK'):
+                parsed = False
+                if docx:
+                    try:
+                        doc = docx.Document(io.BytesIO(content))
+                        text = "\n".join([p.text for p in doc.paragraphs])
+                        parsed = True
+                    except Exception: pass
+                if not parsed:
+                    try:
+                        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+                            for name in zf.namelist():
+                                if "contents" in name and name.endswith(".xml"):
+                                    xml_content = zf.read(name).decode("utf-8", errors="ignore")
+                                    text += re.sub("<[^>]+>", " ", xml_content) + "\n"
+                    except Exception: pass
+            # HWP 판독
+            elif content.startswith(b'\xd0\xcf\x11\xe0'):
+                if olefile:
+                    try:
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".hwp") as tmp:
+                            tmp.write(content)
+                            tmp_path = tmp.name
+                        if olefile.isOleFile(tmp_path):
+                            ole = olefile.OleFileIO(tmp_path)
+                            if ole.exists("PrvText"):
+                                text = ole.openstream("PrvText").read().decode("utf-16", errors="ignore")
+                            ole.close()
+                        os.remove(tmp_path)
+                    except Exception: pass
+            
+            emails.update(EMAIL_PATTERN.findall(text))
+            phones.update(PHONE_PATTERN.findall(text))
+            
+            if not needs_oneclick:
+                if any(kw in text for kw in DOC_KEYWORDS) and any(kw in text for kw in SUBMIT_KEYWORDS):
+                    needs_oneclick = True
+                    
+        except Exception:
+            pass
+            
+    oneclick_flag = "💡 원클릭 제안 필요" if needs_oneclick else "-"
+    return ", ".join(sorted(emails)), ", ".join(sorted(phones)), oneclick_flag
 
 def clean_mixed_text(text):
-    if not text:
-        return "확인 필요"
+    if not text: return "확인 필요"
     lines = text.split('\n')
-    cleaned_lines = []
-    for line in lines:
-        eng_chars = sum(1 for c in line if ord(c) < 128 and c.isalpha())
-        total_len = len(line.strip())
-        if total_len > 0 and (eng_chars / total_len) > 0.6:
-            continue
-        cleaned_lines.append(line)
-        
+    cleaned_lines = [l for l in lines if not (sum(1 for c in l if ord(c) < 128 and c.isalpha()) / max(len(l.strip()), 1) > 0.6)]
     result = " ".join(cleaned_lines).strip()
-    for marker in ["Probably", "The announcement", "Also", "Also maybe", "Must be"]:
-        if marker in result:
-            result = result.split(marker)[0].strip()
-
     if len(result) < 2:
-        hangul_parts = re.findall(r'[가-힣0-9%.,~()\-\s]+', text)
-        result = "".join(hangul_parts).strip()
-
+        result = "".join(re.findall(r'[가-힣0-9%.,~()\-\s]+', text)).strip()
     return result if len(result) > 1 else "확인 필요"
 
 def analyze_with_openrouter(full_text):
-    scale_result = "지원 규모 확인 필요"
-    docs_result = "필수 서류 확인 필요"
-
-    if not client or not full_text:
-        return scale_result, docs_result
+    scale_result, docs_result = "지원 규모 확인 필요", "필수 서류 확인 필요"
+    if not client or not full_text: return scale_result, docs_result
     
-    if len(full_text) > 4000:
-        truncated_text = full_text[:2000] + "\n...\n" + full_text[-2000:]
-    else:
-        truncated_text = full_text
-
     try:
         completion = client.chat.completions.create(
             model="openrouter/free",
             messages=[
-                {
-                    "role": "system",
-                    "content": "당신은 정부 지원사업 공고 분석 전문가입니다. 반드시 순수 한국어로만 핵심만 요약하십시오."
-                },
-                {
-                    "role": "user",
-                    "content": f"""
-다음 공고 내용과 문서 내용을 분석하여 아래 형식의 '오직 한국어'로만 정확히 두 줄을 작성해 주세요.
-
-지원규모: [선정 기업 수 및 지원 내용을 요약. 예: 부스·장치비 전액 지원, 5개사 내외 선정 등]
-필수서류: [제출해야 하는 서류들을 쉼표로 나열. 예: 사업자등록증명, 법인등기부등본, 사업계획서 등]
-
-[공고문 내용]
-{truncated_text}
-                    """
-                }
+                {"role": "system", "content": "당신은 정부 지원사업 공고 분석 전문가입니다. 반드시 순수 한국어로만 핵심만 요약하십시오."},
+                {"role": "user", "content": f"다음 내용을 분석하여 정확히 두 줄로 요약해 주세요.\n\n지원규모: [선정 기업 수 및 지원 내용]\n필수서류: [제출 서류 나열]\n\n{full_text[:3000]}"}
             ],
             temperature=0.1,
-            max_tokens=300,
+            max_tokens=250,
         )
-        
         if completion and completion.choices and completion.choices[0].message:
-            text_resp = completion.choices[0].message.content
-            if text_resp:
-                text_resp = text_resp.strip()
-                for line in text_resp.split('\n'):
-                    if "지원규모:" in line or "모집규모:" in line:
-                        val = line.split(":", 1)[1].strip()
-                        scale_result = clean_mixed_text(val)
-                    elif "필수서류:" in line:
-                        val = line.split(":", 1)[1].strip()
-                        docs_result = clean_mixed_text(val)
-                        
-    except Exception as e:
-        print(f"⚠️ OpenRouter API 분석 중 오류: {str(e)}")
-        
+            text_resp = completion.choices[0].message.content.strip()
+            for line in text_resp.split('\n'):
+                if "지원규모:" in line: scale_result = clean_mixed_text(line.split(":", 1)[1])
+                elif "필수서류:" in line: docs_result = clean_mixed_text(line.split(":", 1)[1])
+    except Exception: pass
     return scale_result, docs_result
 
 def analyze_and_build_newsletter(items):
@@ -237,70 +195,61 @@ def analyze_and_build_newsletter(items):
 
     for idx, item in enumerate(items, 1):
         reg_date = str(item.get("pblancDe") or item.get("regDt") or item.get("creatDt") or "")
-        
         if reg_date:
-            if yesterday not in reg_date and yesterday_alt not in reg_date:
-                continue
+            if yesterday not in reg_date and yesterday_alt not in reg_date: continue
         else:
-            if idx > 20:
-                continue
+            if idx > 20: continue
 
         title = item.get("pblancNm") or item.get("title", "제목없음")
         exec_org = item.get("excInsttNm") or item.get("jrsdInsttNm") or "수행기관 미표기"
         period = item.get("reqstBeginEndDe") or item.get("reqstDt", "일정 참조")
         link = item.get("pblancUrl") or item.get("link", "#")
         summary = item.get("bsnsSumryCn", "")
-        ref_name = item.get("refrncNm", "")
-        original_method = item.get("reqstMthDscd") or item.get("reqstMthCn") or item.get("reqstMthPapersCn") or item.get("rcivMth") or "공고문 참조"
+        original_method = item.get("reqstMthDscd") or item.get("reqstMthCn") or item.get("rcivMth") or "공고문 참조"
         
-        doc_url = item.get("printFlpthNm") or item.get("atchFileUrl") or ""
-        doc_text = extract_all_document_text(doc_url)
-        
-        full_text = f"{title} {summary} {ref_name} {original_method} {doc_text}"
+        attach_urls = []
+        for f_key in ["bidSpecificationUrl"] + [f"ntceSpecDocUrl{i}" for i in range(1, 6)]:
+            u = item.get(f_key)
+            if u:
+                if not u.startswith("http"): u = "https://www.g2b.go.kr:8081" + ("/" if not u.startswith("/") else "") + u
+                attach_urls.append(u)
+
+        doc_email, doc_tel, oneclick_flag = "", "", "-"
+        if attach_urls:
+            doc_email, doc_tel, oneclick_flag = extract_docs_and_contacts(attach_urls)
+
+        full_text = f"{title} {summary} {original_method}"
 
         raw_emails = EMAIL_PATTERN.findall(full_text)
-        emails = []
-        for e in raw_emails:
-            if "@" in e and "." in e and len(e) < 50:
-                emails.append(e)
-        emails = list(set(emails))
+        if doc_email: raw_emails.extend(doc_email.split(", "))
+        emails = list(set([e.strip() for e in raw_emails if "@" in e and len(e) < 50]))
         
         clean_title_sig = re.sub(r'\s+', '', title)
         signature = f"{exec_org}_{clean_title_sig}"
-        
-        if signature in seen_signatures:
-            print(f"🔄 [중복 공고 스킵]: '{title}'")
-            continue
+        if signature in seen_signatures: continue
         seen_signatures.add(signature)
 
         is_online_only = ("온라인" in original_method or "누리집" in original_method or "홈페이지" in original_method) and not ("이메일" in original_method or "전자우편" in original_method or "방문" in original_method or "우편" in original_method)
         
         if is_online_only:
             online_count += 1
-            badge_text = "온라인 사이트 접수"
-            badge_style = "background:#e0f2fe; color:#0369a1;"
-            target_type = "온라인"
+            badge_text, badge_style, target_type = "온라인 사이트 접수", "background:#e0f2fe; color:#0369a1;", "온라인"
         else:
             email_action_count += 1
-            badge_text = "이메일/방문접수"
-            badge_style = "background:#e6f4ea; color:#137333;"
-            target_type = "직접접수"
+            badge_text, badge_style, target_type = "이메일/방문접수", "background:#e6f4ea; color:#137333;", "직접접수"
 
         valid_count += 1
         print(f"🤖 [AI 분석 중 ({valid_count})] '{title}'...")
-        
         parsed_scale, parsed_docs = analyze_with_openrouter(full_text)
         time.sleep(0.2)
 
         phones = PHONE_PATTERN.findall(full_text)
-        phone_str = phones[0] if phones else (ref_name if ref_name else "문의처 참조")
+        if doc_tel: phones.extend(doc_tel.split(", "))
+        phone_str = phones[0] if phones else "문의처 참조"
         email_str = emails[0] if emails else "이메일 공고문 참조"
 
         if not is_online_only and emails:
-            to_email = emails[0]
-            cc_emails = ",".join(emails[1:]) if len(emails) > 1 else ""
-            mailto_link = f"mailto:{to_email}?subject=[지원문의] {title}"
-            if cc_emails: mailto_link += f"&cc={cc_emails}"
+            mailto_link = f"mailto:{emails[0]}?subject=[지원문의] {title}"
             action_btn = f'<a href="{mailto_link}" style="background:#137333; color:white; padding:6px 14px; border-radius:4px; font-size:11px; font-weight:bold; text-decoration:none; display:inline-block;">⚡ 원클릭 메일 제안</a>'
         else:
             action_btn = f'<a href="{link}" target="_blank" style="background:#0369a1; color:white; padding:6px 12px; border-radius:4px; font-size:11px; font-weight:bold; text-decoration:none;">🌐 온라인 신청 바로가기</a>'
@@ -341,11 +290,7 @@ def analyze_and_build_newsletter(items):
         """
 
     if valid_count == 0:
-        cards_html = """
-        <div style="background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:30px; text-align:center; color:#666;">
-            전날 등록된 신규 공고가 없거나 조건에 맞는 공고가 없습니다.
-        </div>
-        """
+        cards_html = '<div style="background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:30px; text-align:center; color:#666;">전날 등록된 신규 공고가 없거나 조건에 맞는 공고가 없습니다.</div>'
 
     csv_text = "\uFEFF" + "구분,공고명,지원규모,수행기관,신청기간,신청방법,이메일,필수서류\n"
     for r in csv_rows:
@@ -392,18 +337,13 @@ def send_email(html_body):
     sender_email = os.environ.get("MAIL_USER")
     sender_password = os.environ.get("EMAIL_PASS")
     receiver_list = os.environ.get("MAIL_RECEIVER") or sender_email
-
-    if not sender_email or not sender_password:
-        print("⚠️ [이메일 생략] 깃허브 Secrets에 MAIL_USER 또는 EMAIL_PASS가 설정되지 않았습니다.")
-        return
+    if not sender_email or not sender_password: return
 
     receivers = [email.strip() for email in receiver_list.split(",")]
-
     msg = MIMEMultipart("alternative")
     msg["Subject"] = "📊 [B2G AI 뉴스레터] 전날 등록된 신규 지원사업 공고 리포트"
     msg["From"] = sender_email
     msg["To"] = ", ".join(receivers)
-    
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     try:
@@ -421,6 +361,3 @@ if __name__ == "__main__":
     if notices:
         html_report = analyze_and_build_newsletter(notices)
         send_email(html_report)
-    else:
-        print("❌ 공고 데이터를 가져오지 못해 작업을 종료합니다.")
-
