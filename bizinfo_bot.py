@@ -15,7 +15,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # API 및 환경 변수 설정
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
-CRTFC_KEY = "Ofgt6R"  # 기업마당 인증키
+CRTFC_KEY = "4vc2gy"  # 👈 새로 발급받으신 인증키 적용 완료!
 
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
@@ -33,8 +33,6 @@ RECEIVER_EMAILS = [
 ]
 # =====================================================================
 
-# 💡 타겟 키워드 필터링은 삭제했습니다. 모든 공고를 가져옵니다!
-
 CORP_KEYWORDS = ["중소기업", "기업", "법인", "사업자", "컨소시엄", "주관기관", "벤처", "소상공인"]
 INDIVIDUAL_KEYWORDS = ["개인", "일반국민", "청년", "구직자", "학생", "개인사업자 제외"]
 DOC_KEYWORDS = ["사업자등록증", "재무제표", "신용평가", "인감증명서", "법인등기", "주주명부", "국세완납", "지방세완납"]
@@ -43,29 +41,32 @@ EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 PHONE_PATTERN = re.compile(r"0\d{1,2}-\d{3,4}-\d{4}")
 
 def fetch_bizinfo_notices():
-    # 💡 1. 봇 차단을 피하기 위해 일반 크롬 브라우저인 것처럼 위장
+    # 💡 인증키와 파라미터를 URL에 직접 결합하여 유실 방지
+    req_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=100&pageIndex=1"
+    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
-    params = {"crtfcKey": CRTFC_KEY, "dataType": "json", "searchCnt": "100", "pageIndex": "1"}
     
     try:
-        print("⏳ 기업마당 API 서버에 요청을 보냅니다...")
-        resp = requests.get(BIZINFO_API_URL, params=params, headers=headers, timeout=15, verify=False)
+        print("⏳ 기업마당 API 서버에 데이터를 요청합니다...")
+        resp = requests.get(req_url, headers=headers, timeout=15, verify=False)
         print(f"✅ 서버 응답 상태 코드: {resp.status_code}")
-        
-        # 💡 2. 서버가 뭐라고 답변했는지 원본 텍스트 앞부분을 강제로 출력
-        print(f"📦 서버 응답 데이터(미리보기):\n{resp.text[:500]}")
         
         if resp.status_code == 200:
             try:
                 data = resp.json()
+                if "reqErr" in data:
+                    print(f"❌ 서버 에러 메시지: {data['reqErr']}")
+                    return []
+                    
                 items = data.get("jsonArray") or data.get("item") or data.get("items") or []
-                print(f"🎯 정상 파싱된 공고 개수: {len(items)}개")
+                print(f"🎯 정상 파싱된 지원사업 공고 개수: {len(items)}개")
                 return items
             except Exception as json_e:
-                print(f"❌ JSON 변환 에러 (데이터 형식이 다릅니다): {json_e}")
-                return []
+                print(f"❌ JSON 파싱 에러: {json_e}")
+                print(f"📦 원본 응답 내용 일부: {resp.text[:300]}")
+                
     except Exception as e:
         print(f"❌ API 요청 중 에러 발생: {e}")
         
@@ -83,8 +84,6 @@ def process_and_analyze(items):
         file_url = item.get("flpthNm") or item.get("printFlpthNm", "")
         contact_info = item.get("refrncNm", "")
         papers_info = item.get("reqstMthPapersCn", "")
-        
-        # 💡 필터링 없이 모두 패스!
             
         target_text = f"{target_nm} {summary}"
         corp_score = sum(target_text.count(kw) for kw in CORP_KEYWORDS)
