@@ -2,7 +2,7 @@ name: Bizinfo B2G Bot
 
 on:
   schedule:
-    - cron: '0 21 * * *' # 매일 새벽 6시 (KST 기준)
+    - cron: '0 21 * * *'
   workflow_dispatch:
 
 jobs:
@@ -17,11 +17,11 @@ jobs:
         with:
           python-version: '3.10'
 
-      # 🚨 바로 이 부분이 있는지 꼭 확인해주세요!
+      # 📌 이 부분을 통째로 복사해서 넣어주세요!
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests beautifulsoup4 google-generativeai
+          python -m pip install requests beautifulsoup4 google-generativeai
 
       - name: Run bot script
         run: python bizinfo_bot.py
