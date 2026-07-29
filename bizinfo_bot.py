@@ -5,12 +5,16 @@ import urllib.request
 import json
 import ssl
 import smtplib
+import requests
+from bs4 import BeautifulSoup
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+# 제공해주신 기업마당 API 정보
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
 CRTFC_KEY = "4vc2gy"
 
+# 정규식 패턴 정의
 EMAIL_PATTERN = re.compile(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}")
 PHONE_PATTERN = re.compile(r"0\d{1,2}-\d{3,4}-\d{4}")
 DOC_KEYWORDS = ["사업자등록증", "재무제표", "신용평가", "인감증명서", "법인등기", "주주명부", "국세완납", "지방세완납", "견적서", "소개서", "이력서", "신청서"]
@@ -45,6 +49,29 @@ def fetch_bizinfo_notices():
         print(f"❌ [연결 에러]: {str(e)}")
     return []
 
+def crawl_detail_page(url):
+    """상세 페이지에 접속하여 본문 텍스트를 긁어오고 핵심 정보를 정규식으로 파싱합니다."""
+    if not url or url == "#":
+        return "상세 링크 없음", "상세 내용 참조"
+    
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
+            # 페이지 전체 텍스트 추출
+            full_text = soup.get_text(separator=" ", strip=True)
+            
+            # 1. 모집규모 파싱 시도 (예: "모집규모 : 5업체 내외" 또는 주변 텍스트)
+            scale_match = re.search(r"(모집규모|지원규모)[:\s]+([^,\n\.]{2,25})", full_text)
+            scale_text = scale_match.group(0) if scale_match else "공고문 참조"
+            
+            return full_text, scale_text
+    except Exception as e:
+        print(f"⚠️ 상세 페이지 크롤링 실패 ({url}): {str(e)}")
+    
+    return "", "공고문 참조"
+
 def analyze_and_build_html(items):
     rows_html = ""
     
@@ -57,7 +84,10 @@ def analyze_and_build_html(items):
         ref_name = item.get("refrncNm", "")
         original_method = item.get("reqstMthDscd") or item.get("reqstMthCn") or item.get("reqstMthPapersCn") or item.get("rcivMth") or "공고문 참조"
         
-        full_text = f"{summary} {ref_name} {original_method}"
+        # 상세 페이지 크롤링 및 본문 확보
+        detail_text, parsed_scale = crawl_detail_page(link)
+        
+        full_text = f"{summary} {ref_name} {original_method} {detail_text}"
 
         target_type = "👤 개인" if ("개인" in full_text and "기업" not in full_text) else "🏢 기업"
 
@@ -87,7 +117,7 @@ def analyze_and_build_html(items):
         rows_html += f"""
         <tr>
             <td style="padding:10px; border-bottom:1px solid #eee; text-align:center; font-size:11px;">{target_type}</td>
-            <td style="padding:10px; border-bottom:1px solid #eee; font-weight:bold;">{title}</td>
+            <td style="padding:10px; border-bottom:1px solid #eee; font-weight:bold;">{title}<br><span style="color:#004aad; font-size:11px; font-weight:normal;">📌 {parsed_scale}</span></td>
             <td style="padding:10px; border-bottom:1px solid #eee; color:#555;">{exec_org}</td>
             <td style="padding:10px; border-bottom:1px solid #eee; font-size:12px;">{period}</td>
             <td style="padding:10px; border-bottom:1px solid #eee; font-size:12px;">{original_method}</td>
@@ -105,13 +135,13 @@ def analyze_and_build_html(items):
     <head><meta charset="utf-8"></head>
     <body style="font-family:'Malgun Gothic', sans-serif; color:#333;">
         <div style="max-width:1500px; margin:0 auto; padding:20px;">
-            <h2 style="color:#004aad;">📊 B2G 지원사업 실시간 수집 및 원클릭 제안 리포트</h2>
-            <p>기업마당 API 연동 결과, 총 {len(items)}건의 공고가 수집되었습니다.</p>
+            <h2 style="color:#004aad;">📊 B2G 지원사업 실시간 수집 및 원클릭 제안 리포트 (상세 파싱 적용)</h2>
+            <p>기업마당 API 및 상세 페이지 분석 결과, 총 {len(items)}건의 공고가 처리되었습니다.</p>
             <table style="width:100%; border-collapse:collapse; margin-top:15px;">
                 <thead>
                     <tr style="background-color:#f8fafc; color:#444; font-size:12px;">
                         <th style="padding:10px; border-bottom:2px solid #ddd;">구분</th>
-                        <th style="padding:10px; border-bottom:2px solid #ddd;">공고명</th>
+                        <th style="padding:10px; border-bottom:2px solid #ddd;">공고명 및 자동 파싱(모집규모)</th>
                         <th style="padding:10px; border-bottom:2px solid #ddd;">사업수행기관</th>
                         <th style="padding:10px; border-bottom:2px solid #ddd;">신청기간</th>
                         <th style="padding:10px; border-bottom:2px solid #ddd;">신청방법 (원본 상세)</th>
@@ -144,7 +174,7 @@ def send_email(html_body):
     receivers = [email.strip() for email in receiver_list.split(",")]
 
     msg = MIMEMultipart("alternative")
-    msg["Subject"] = "📊 [자동화 리포트] B2G 지원사업 및 원클릭 제안 현황"
+    msg["Subject"] = "📊 [자동화 리포트] B2G 지원사업 상세 분석 및 제안 현황"
     msg["From"] = sender_email
     msg["To"] = ", ".join(receivers)
     
@@ -167,4 +197,5 @@ if __name__ == "__main__":
         send_email(html_report)
     else:
         print("❌ 공고 데이터를 가져오지 못해 작업을 종료합니다.")
+
 
