@@ -6,6 +6,7 @@ import json
 import ssl
 import smtplib
 import io
+import time
 import requests
 from bs4 import BeautifulSoup
 from email.mime.multipart import MIMEMultipart
@@ -13,7 +14,7 @@ from email.mime.text import MIMEText
 import google.generativeai as genai
 from pypdf import PdfReader
 
-# 제공해주신 기업마당 API 정보
+# 기업마당 API 정보
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
 CRTFC_KEY = "4vc2gy"
 
@@ -40,32 +41,37 @@ def fetch_bizinfo_notices():
         }
     )
 
-    try:
-        print("⏳ [수집 시작] 표준 보안 연결로 기업마당 API 호출 중...")
-        with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
-            if response.status == 200:
-                res_body = response.read().decode('utf-8')
-                data = json.loads(res_body)
-                items = data.get("jsonArray") or data.get("item") or data.get("items") or []
-                print(f"🎯 [수집 성공] 총 {len(items)}건의 공고를 불러왔습니다.")
-                return items
-    except Exception as e:
-        print(f"❌ [연결 에러]: {str(e)}")
+    # 🔄 타임아웃 발생 시 최대 3번까지 재시도하는 로직 추가
+    max_retries = 3
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"⏳ [수집 시도 {attempt}/{max_retries}] 표준 보안 연결로 기업마당 API 호출 중...")
+            with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
+                if response.status == 200:
+                    res_body = response.read().decode('utf-8')
+                    data = json.loads(res_body)
+                    items = data.get("jsonArray") or data.get("item") or data.get("items") or []
+                    print(f"🎯 [수집 성공] 총 {len(items)}건의 공고를 불러왔습니다.")
+                    return items
+        except Exception as e:
+            print(f"⚠️ [연결 경고 (시도 {attempt})]: {str(e)}")
+            if attempt < max_retries:
+                print("⏳ 3초 후 재시도합니다...")
+                time.sleep(3)
+            else:
+                print("❌ [최종 실패] API 연결에 실패했습니다.")
     return []
 
 def extract_text_from_pdf_url(pdf_url):
-    """API 응답에 포함된 PDF 다운로드 링크에서 텍스트를 추출합니다."""
     if not pdf_url or not pdf_url.startswith("http"):
         return ""
     try:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
         res = requests.get(pdf_url, headers=headers, timeout=10)
         if res.status_code == 200 and len(res.content) > 1000:
-            # PDF 바이너리 데이터를 메모리에서 읽기
             pdf_file = io.BytesIO(res.content)
             reader = PdfReader(pdf_file)
             extracted_text = ""
-            # 전체 페이지 중 앞서 핵심 내용이 집중된 1~5페이지 위주로 추출
             for page in reader.pages[:5]:
                 text = page.extract_text()
                 if text:
@@ -76,7 +82,6 @@ def extract_text_from_pdf_url(pdf_url):
     return ""
 
 def analyze_with_gemini(full_text):
-    """추출된 원본 문서 텍스트를 Gemini AI로 분석합니다."""
     if not GEMINI_API_KEY or not full_text:
         return "공고문 참조", "공고문 참조"
     
@@ -123,15 +128,12 @@ def analyze_and_build_html(items):
         ref_name = item.get("refrncNm", "")
         original_method = item.get("reqstMthDscd") or item.get("reqstMthCn") or item.get("reqstMthPapersCn") or item.get("rcivMth") or "공고문 참조"
         
-        # 🔗 API 응답값에 들어있는 진짜 PDF 원본 파일 경로 추출 (`printFlpthNm`)
         pdf_url = item.get("printFlpthNm", "")
         pdf_filename = item.get("printFileNm", "")
         
-        # PDF 파일에서 텍스트 추출 시도, 없으면 기본 요약 텍스트 활용
         pdf_text = extract_text_from_pdf_url(pdf_url)
         full_text = f"{summary} {ref_name} {original_method} {pdf_text}"
 
-        # 이메일 접수 건 필터링
         raw_emails = EMAIL_PATTERN.findall(full_text)
         emails = list(set(raw_emails))
         is_email_apply = "이메일" in original_method or "전자우편" in original_method or len(emails) > 0
@@ -142,7 +144,6 @@ def analyze_and_build_html(items):
         valid_count += 1
         print(f"🤖 [AI 원본 파일 분석 중] '{title}'...")
         
-        # 🧠 PDF 원본 텍스트 기반 Gemini AI 분석 수행
         parsed_scale, parsed_docs = analyze_with_gemini(full_text)
 
         target_type = "👤 개인" if ("개인" in full_text and "기업" not in full_text) else "🏢 기업"
@@ -159,7 +160,6 @@ def analyze_and_build_html(items):
         phones = PHONE_PATTERN.findall(full_text)
         contact_html = f"📞 {phones[0]}" if phones else (ref_name if ref_name else "-")
 
-        # PDF 원본 파일 바로보기 링크 제공
         pdf_link_html = f'<br><a href="{pdf_url}" target="_blank" style="color:#d93025; font-size:11px; font-weight:bold;">📄 원본 PDF: {pdf_filename}</a>' if pdf_url else ""
 
         rows_html += f"""
