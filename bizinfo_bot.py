@@ -8,7 +8,7 @@ import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-# 💡 제공해주신 기업마당 API 정보
+# 제공해주신 기업마당 API 정보
 BIZINFO_API_URL = "https://www.bizinfo.go.kr/uss/rss/bizinfoApi.do"
 CRTFC_KEY = "4vc2gy"
 
@@ -169,3 +169,4 @@ if __name__ == "__main__":
         send_email(html_report)
     else:
         print("❌ 공고 데이터를 가져오지 못해 작업을 종료합니다.")
+
