@@ -18,10 +18,8 @@ PHONE_PATTERN = re.compile(r"0\d{1,2}-\d{3,4}-\d{4}")
 DOC_KEYWORDS = ["사업자등록증", "재무제표", "신용평가", "인감증명서", "법인등기", "주주명부", "국세완납", "지방세완납", "견적서", "소개서", "이력서", "신청서"]
 
 def fetch_bizinfo_notices():
-    # 💡 직접 API 호출 주소 생성
     target_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=50"
     
-    # SSL 인증 우회 설정 (서버 간 통신 안정성 확보)
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
@@ -36,7 +34,6 @@ def fetch_bizinfo_notices():
 
     try:
         print("⏳ [수집 시작] 표준 보안 연결로 기업마당 API 호출 중...")
-        # 30초 타임아웃 설정
         with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
             if response.status == 200:
                 res_body = response.read().decode('utf-8')
@@ -64,17 +61,14 @@ def analyze_and_build_html(items):
         
         full_text = f"{summary} {ref_name} {original_method}"
 
-        # 1. 대상 분류 (기업 vs 개인)
         target_type = "👤 개인" if ("개인" in full_text and "기업" not in full_text) else "🏢 기업"
 
-        # 2. 복수 이메일 전체 추출 (중복 제거)
         raw_emails = EMAIL_PATTERN.findall(full_text)
         emails = list(set(raw_emails))
         
         is_email_apply = "이메일" in original_method or "전자우편" in original_method or len(emails) > 0
         is_direct_apply = "방문" in original_method or "직접" in original_method or "우편" in original_method or "서면" in original_method
 
-        # 3. 원클릭 제안 및 이메일 칸 구성
         one_click_html = "-"
         email_html = "-"
 
@@ -86,7 +80,6 @@ def analyze_and_build_html(items):
         elif is_email_apply:
             one_click_html = '<span style="color:#137333; font-weight:bold; font-size:11px;">이메일 접수</span>'
 
-        # 4. 필요 서류 및 문의처 파싱
         found_docs = [doc for doc in DOC_KEYWORDS if doc in full_text]
         docs_html = ", ".join([f'<span style="color:#c5221f; font-weight:bold;">{d}</span>' for d in found_docs]) if found_docs else "공고문 참조"
         
