@@ -143,12 +143,13 @@ def analyze_and_build_html(items):
 
 def send_email(html_body):
     sender_email = os.environ.get("MAIL_USER")
-    sender_password = os.environ.get("MAIL_PASS")
+    sender_password = os.environ.get("EMAIL_PASS")  # 💡 여기를 깃허브에 등록된 이름인 EMAIL_PASS로 변경!
     receiver_list = os.environ.get("MAIL_RECEIVER") or sender_email
 
     if not sender_email or not sender_password:
-        print("⚠️ [이메일 생략] 깃허브 Secrets에 MAIL_USER 또는 MAIL_PASS가 설정되지 않았습니다.")
+        print("⚠️ [이메일 생략] 깃허브 Secrets에 MAIL_USER 또는 EMAIL_PASS가 설정되지 않았습니다.")
         return
+...
 
     receivers = [email.strip() for email in receiver_list.split(",")]
 
