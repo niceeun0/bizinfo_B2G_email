@@ -20,7 +20,7 @@ jobs:
       - name: Install System Dependencies (OCR & Image tools)
         run: |
           sudo apt-get update
-          sudo apt-get install -y tesseract-ocr tesseract-ocr-kor libgl1-mesa-glx
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-kor libgl1
 
       - name: Install Python Dependencies
         run: |
