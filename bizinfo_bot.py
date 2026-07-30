@@ -91,10 +91,11 @@ MAIL_RECEIVER = os.environ.get("MAIL_RECEIVER", "")
 
 # 요청사항: OpenRouter를 쓰되 환경변수 이름은 GEMINI_API_KEY 그대로 사용
 OPENROUTER_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-# 실제 OpenRouter 무료 모델 슬러그로 교체 가능 (환경변수로 override 가능)
-OPENROUTER_MODEL = os.environ.get(
-    "OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free"
-)
+# openrouter/free 는 OpenRouter가 공식 지원하는 "Free Models Router" 슬러그로,
+# 요청 특성에 맞는 무료 모델을 자동으로 골라 라우팅합니다.
+# (특정 모델을 고정하고 싶다면 "모델명:free" 형태로 환경변수 override 가능,
+#  단 개별 무료 모델 슬러그는 자주 폐기/변경되므로 openrouter/free 권장)
+OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openrouter/free")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 REQUEST_TIMEOUT = 20
@@ -594,7 +595,13 @@ def summarize_with_openrouter(title, body_text):
             resp = requests.post(
                 OPENROUTER_URL, headers=headers, json=payload, timeout=30
             )
-            resp.raise_for_status()
+            if resp.status_code != 200:
+                # 원인 진단을 위해 상태코드와 응답 본문 일부를 로그에 남김
+                log(
+                    f"OpenRouter 요약 실패(시도 {attempt}): "
+                    f"HTTP {resp.status_code} - {resp.text[:300]}"
+                )
+                resp.raise_for_status()
             data = resp.json()
             content = data["choices"][0]["message"]["content"].strip()
             if content:
@@ -718,16 +725,59 @@ def build_html_newsletter(items_data, target_date):
 # =========================================================
 # 8. Gmail SMTP 발송
 # =========================================================
+def parse_recipients(raw_receiver):
+    """
+    MAIL_RECEIVER 값을 안전하게 파싱합니다.
+    - 콤마(,) 또는 세미콜론(;)으로 구분된 다중 수신자 지원
+    - "홍길동 <hong@test.com>" 같은 이름 포함 형식도 지원
+      (SMTP envelope에는 순수 이메일 주소만, 헤더 표시는 이름 포함 유지)
+    - RFC 5321에 맞지 않는(순수 이메일 형식이 아닌) 항목은 걸러내고 경고 로그 출력
+    반환값: (envelope_emails: list[str], header_value: str)
+    """
+    from email.utils import getaddresses, formataddr
+
+    if not raw_receiver:
+        return [], ""
+
+    # 세미콜론을 콤마로 통일한 뒤, 빈 토큰(끝/중간의 연속 콤마 등)을 먼저
+    # 제거합니다. getaddresses는 빈 토큰이 섞이면 전체 파싱이 깨질 수 있습니다.
+    normalized = raw_receiver.replace(";", ",")
+    tokens = [t.strip() for t in normalized.split(",") if t.strip()]
+    parsed = getaddresses(tokens)
+
+    valid = []
+    for name, addr in parsed:
+        addr = addr.strip()
+        if EMAIL_RE.fullmatch(addr):
+            valid.append((name.strip(), addr))
+        else:
+            log(f"경고: 유효하지 않은 수신자 형식이라 제외합니다 -> name='{name}' addr='{addr}'")
+
+    envelope_emails = [addr for _, addr in valid]
+    header_value = ", ".join(
+        formataddr((name, addr)) if name else addr for name, addr in valid
+    )
+    return envelope_emails, header_value
+
+
 def send_email(subject, html_body):
     if not (MAIL_USER and EMAIL_PASS and MAIL_RECEIVER):
         raise RuntimeError(
             "MAIL_USER / EMAIL_PASS / MAIL_RECEIVER 환경변수가 모두 필요합니다."
         )
 
+    envelope_emails, header_value = parse_recipients(MAIL_RECEIVER)
+    if not envelope_emails:
+        raise RuntimeError(
+            "MAIL_RECEIVER에서 유효한 이메일 주소를 하나도 찾지 못했습니다. "
+            f"원본 값(참고용): {MAIL_RECEIVER!r}"
+        )
+    log(f"발송 대상 수신자 {len(envelope_emails)}명 확인: {envelope_emails}")
+
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = MAIL_USER
-    msg["To"] = MAIL_RECEIVER
+    msg["To"] = header_value
     msg.attach(MIMEText(html_body, "html", "utf-8"))
 
     last_err = None
@@ -735,7 +785,8 @@ def send_email(subject, html_body):
         try:
             with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=30) as server:
                 server.login(MAIL_USER, EMAIL_PASS)
-                server.sendmail(MAIL_USER, [MAIL_RECEIVER], msg.as_string())
+                # envelope 수신자는 반드시 순수 이메일 주소 리스트여야 함
+                server.sendmail(MAIL_USER, envelope_emails, msg.as_string())
             log("메일 발송 성공.")
             return
         except Exception as e:
