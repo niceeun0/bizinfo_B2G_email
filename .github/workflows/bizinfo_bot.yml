@@ -1,0 +1,66 @@
+name: BizInfo 신규공고 뉴스레터 봇
+
+on:
+  schedule:
+    # 매일 KST 08:00 실행 (UTC 기준 전날 23:00)
+    - cron: "0 23 * * *"
+  workflow_dispatch: {}   # 수동 실행 버튼 활성화
+
+permissions:
+  contents: read
+
+jobs:
+  send-newsletter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 시스템 패키지 설치 (OCR / PDF 렌더링 / curl)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            curl \
+            poppler-utils \
+            tesseract-ocr \
+            tesseract-ocr-kor
+
+      - name: 파이썬 의존성 설치
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: DNS 상태 사전 점검 (디버그용, 실패해도 계속 진행)
+        run: |
+          echo "--- getent hosts ---"
+          getent hosts www.bizinfo.go.kr || true
+          echo "--- curl 연결 테스트 ---"
+          curl -sS -m 10 -o /dev/null -w "HTTP status: %{http_code}\n" https://www.bizinfo.go.kr || true
+        continue-on-error: true
+
+      - name: 봇 실행
+        env:
+          MAIL_USER: ${{ secrets.MAIL_USER }}
+          EMAIL_PASS: ${{ secrets.EMAIL_PASS }}
+          MAIL_RECEIVER: ${{ secrets.MAIL_RECEIVER }}
+          # 실제로는 OpenRouter API 키를 이 시크릿에 등록합니다.
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENROUTER_MODEL: "meta-llama/llama-3.1-8b-instruct:free"
+        run: |
+          python bizinfo_bot.py
+
+      - name: 실패 시 로그 아티팩트 업로드
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bizinfo-bot-logs
+          path: |
+            _tmp_attachments/
+          retention-days: 3
