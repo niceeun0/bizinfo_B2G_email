@@ -42,6 +42,7 @@ import json
 import time
 import base64
 import socket
+import difflib
 import zipfile
 import smtplib
 import subprocess
@@ -49,6 +50,7 @@ import traceback
 from datetime import datetime, timedelta, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from urllib.parse import quote as urlquote
 
 import requests
 
@@ -74,6 +76,13 @@ try:
 except ImportError:
     pytesseract = None
     convert_from_path = None
+
+try:
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+except ImportError:
+    openpyxl = None
 
 
 # =========================================================
@@ -541,6 +550,161 @@ EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 PHONE_RE = re.compile(r"(0\d{1,2}[-.\s]?\d{3,4}[-.\s]?\d{4})")
 
 
+# =========================================================
+# 5-1. 경량 RAG: 관련 구절만 찾아서 넘기기 (NotebookLM 방식의 축소판)
+# =========================================================
+# 벡터DB/임베딩 없이도, 공고문 특성상 아래 키워드 주변만 잘라내면
+# "지원규모/필수서류"에 필요한 내용을 대부분 커버할 수 있습니다.
+# 이렇게 하면 (1) 프롬프트가 훨씬 작아지고 (2) 모델이 원문 전체를 훑으며
+# reasoning 토큰을 낭비할 필요가 없어집니다.
+
+# "지원규모"류 키워드: 금액/한도뿐 아니라, "최종 몇 개사 선정" 식의
+# 선정 규모(정원)를 밝히는 공고도 많아 관련 표현을 폭넓게 포함시킴
+BUDGET_KEYWORDS = [
+    "지원규모", "지원 규모", "지원한도", "지원 한도", "지원금액", "지원 금액",
+    "지원비율", "지원 비율", "보조금", "사업비", "지원한도액", "지원내용", "지원 내용",
+    "사업규모", "사업 규모", "모집규모", "모집 규모", "선정규모", "선정 규모",
+    "최종선정", "최종 선정", "선정인원", "선정 인원", "선정업체", "선정 업체",
+    "모집인원", "모집 인원", "지원기업수", "지원 기업 수", "선정기업수",
+]
+# "필수서류"류 키워드
+DOCS_KEYWORDS = [
+    "제출서류", "제출 서류", "구비서류", "구비 서류", "필수서류", "필수 서류",
+    "신청서류", "신청 서류", "첨부서류", "첨부 서류", "공통서류", "공통 서류",
+    "제출 구비서류",
+]
+
+# 실제 공고문에 자주 등장하는 구체적 서류명 (직접 문자열 탐지용).
+# 길이가 긴 표현을 먼저 검사해서, 짧은 표현이 긴 표현의 부분집합인 경우
+# 중복으로 잡히지 않도록 처리합니다 (예: "사업자등록증명" vs "사업자등록증").
+SPECIFIC_DOC_NAMES = [
+    "사업자등록증명원", "사업자등록증명", "사업자등록증",
+    "법인등기부등본", "법인 등기부등본",
+    "표준재무제표증명", "표준재무제표증명원", "재무제표",
+    "부가가치세과세표준증명원", "부가가치세과세표준증명",
+    "국세완납증명서", "국세 완납증명서", "국세완납증명",
+    "지방세완납증명서", "지방세 완납증명서", "지방세완납증명",
+    "중소기업확인서",
+]
+
+# 지원 규모(금액/인원)를 나타내는 표현을 문서 전체에서 직접 정규식으로도 탐지
+MONEY_RE = re.compile(
+    r"(?:최대\s*)?\d[\d,]{0,12}\s*(?:천만원|백만원|만원|억원|원)"
+    r"(?:\s*(?:이내|한도|내외))?"
+)
+SELECT_COUNT_RE = re.compile(
+    r"\d+\s*(?:개사|개\s*기업|개\s*업체|개소|개\s*팀|명)\s*(?:내외)?"
+    r"(?:을|를)?\s*(?:선정|모집|지원|선발)"
+)
+
+
+def _find_keyword_windows(text, keywords, before=30, after=350, max_per_keyword=2):
+    """키워드가 등장하는 위치(키워드당 최대 max_per_keyword회) 주변을 구간으로 반환."""
+    windows = []
+    for kw in keywords:
+        start_search = 0
+        count = 0
+        while count < max_per_keyword:
+            idx = text.find(kw, start_search)
+            if idx == -1:
+                break
+            start = max(0, idx - before)
+            end = min(len(text), idx + len(kw) + after)
+            windows.append((start, end))
+            start_search = idx + len(kw)
+            count += 1
+    return windows
+
+
+def _find_regex_windows(text, pattern, before=60, after=150, max_matches=3):
+    """정규식 매치 위치 주변을 구간으로 반환 (금액/선정인원 등)."""
+    windows = []
+    for i, m in enumerate(pattern.finditer(text)):
+        if i >= max_matches:
+            break
+        start = max(0, m.start() - before)
+        end = min(len(text), m.end() + after)
+        windows.append((start, end))
+    return windows
+
+
+def _merge_windows(windows, gap=50):
+    """겹치거나 가까운 구간을 하나로 합쳐서 중복 텍스트를 줄임."""
+    if not windows:
+        return []
+    windows.sort()
+    merged = [windows[0]]
+    for s, e in windows[1:]:
+        last_s, last_e = merged[-1]
+        if s <= last_e + gap:
+            merged[-1] = (last_s, max(last_e, e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def extract_relevant_context(text, max_chars=2600, fallback_chars=1500):
+    """
+    문서 전체 대신, [지원규모]/[필수서류] 관련 키워드·정규식 매치 주변
+    구절만 뽑아서 반환합니다. 아무것도 못 찾으면 기존 방식(앞부분 일부)으로
+    안전하게 폴백합니다.
+    """
+    if not text:
+        return ""
+
+    windows = (
+        _find_keyword_windows(text, BUDGET_KEYWORDS)
+        + _find_keyword_windows(text, DOCS_KEYWORDS)
+        + _find_regex_windows(text, MONEY_RE)
+        + _find_regex_windows(text, SELECT_COUNT_RE)
+    )
+    merged = _merge_windows(windows)
+
+    if not merged:
+        # 아무 단서도 못 찾음 -> 앞부분 일부로 폴백 (기존 동작 유지)
+        return text[:fallback_chars]
+
+    snippets = [text[s:e].strip() for s, e in merged]
+    combined = "\n[...]\n".join(s for s in snippets if s)
+    return combined[:max_chars]
+
+
+def _dedupe_doc_names(found_names):
+    """짧은 서류명이 이미 찾은 긴 서류명의 부분 문자열이면 제외."""
+    found_sorted = sorted(set(found_names), key=len, reverse=True)
+    deduped = []
+    for name in found_sorted:
+        if not any(name != other and name in other for other in deduped):
+            deduped.append(name)
+    return deduped
+
+
+def deterministic_summary_hints(body_text):
+    """
+    정규식/문자열 매칭만으로 뽑아낸 결정론적 단서.
+    - AI 호출이 실패해도 이 정보로 최소한의 요약을 만들 수 있고,
+    - AI 호출이 성공할 때는 프롬프트에 '근거'로 함께 제공해 환각을 줄입니다.
+    """
+    if not body_text:
+        return None, None
+
+    money_matches = MONEY_RE.findall(body_text)[:3]
+    select_matches = SELECT_COUNT_RE.findall(body_text)[:2]
+    budget_hint = None
+    hint_parts = []
+    if money_matches:
+        hint_parts.append(", ".join(dict.fromkeys(money_matches)))
+    if select_matches:
+        hint_parts.append(", ".join(dict.fromkeys(select_matches)))
+    if hint_parts:
+        budget_hint = " / ".join(hint_parts)
+
+    found_docs = [name for name in SPECIFIC_DOC_NAMES if name in body_text]
+    docs_hint = ", ".join(_dedupe_doc_names(found_docs)) if found_docs else None
+
+    return budget_hint, docs_hint
+
+
 def extract_contacts(text):
     if not text:
         return [], []
@@ -550,33 +714,142 @@ def extract_contacts(text):
 
 
 # =========================================================
+# 5-2. 유사(중복) 공고 통합
+# =========================================================
+# 기업마당에 동일/유사한 공고가 여러 건 올라오는 경우가 있어, 제목과
+# 본문 내용이 모두 충분히 유사하면 하나로 합칩니다. 세부 프로그램명만
+# 다른 진짜 별개의 공고(예: '맞춤형'/'마케팅'/'디자인' 역량강화)까지
+# 잘못 합치지 않도록, 제목·본문 유사도를 모두 확인하는 이중 조건을
+# 사용합니다. 임계값은 환경변수로 조정할 수 있습니다.
+DEDUP_TITLE_THRESHOLD = float(os.environ.get("DEDUP_TITLE_THRESHOLD", "0.55"))
+DEDUP_BODY_THRESHOLD = float(os.environ.get("DEDUP_BODY_THRESHOLD", "0.92"))
+
+
+def _normalize_for_compare(text):
+    if not text:
+        return ""
+    return re.sub(r"\s+", "", text)[:2000]
+
+
+def _text_similarity(a, b):
+    a_n, b_n = _normalize_for_compare(a), _normalize_for_compare(b)
+    if not a_n or not b_n:
+        return 0.0
+    return difflib.SequenceMatcher(None, a_n, b_n).ratio()
+
+
+def deduplicate_items(items_data):
+    """
+    title_sim(제목 유사도) AND body_sim(본문 유사도) 모두 임계값을 넘을 때만
+    중복으로 판단해 통합합니다. 통합된 항목은 대표 항목의 '_dup_count'를
+    늘리고 이유를 로그로 남깁니다.
+    """
+    kept = []
+    for item in items_data:
+        merged = False
+        for k in kept:
+            title_sim = _text_similarity(item["제목"], k["제목"])
+            if title_sim < DEDUP_TITLE_THRESHOLD:
+                continue
+            body_sim = _text_similarity(
+                item.get("_compare_text", ""), k.get("_compare_text", "")
+            )
+            if body_sim >= DEDUP_BODY_THRESHOLD:
+                k["_dup_count"] = k.get("_dup_count", 1) + 1
+                log(
+                    "유사 공고로 판단되어 통합: "
+                    f"'{item['제목']}' -> '{k['제목']}' "
+                    f"(제목유사도={title_sim:.2f}, 본문유사도={body_sim:.2f})"
+                )
+                merged = True
+                break
+        if not merged:
+            item["_dup_count"] = 1
+            kept.append(item)
+    return kept
+
+
+# =========================================================
 # 6. OpenRouter AI 요약
 # =========================================================
+def _clean_summary_output(raw_content):
+    """
+    모델 응답에서 요구한 두 줄(📌/📋)만 뽑아냅니다. 일부 무료 모델이
+    "USER SAFETY: SAFE" 같은 안전 태그나 영어 메타 문구를 응답에 섞어
+    보내는 경우가 있는데, 어떤 잡음이 섞여 있든 이 두 줄만 정확히
+    추출해서 사용하면 그런 문제를 원천적으로 걸러낼 수 있습니다.
+    실패하면 None을 반환합니다.
+    """
+    if not raw_content:
+        return None
+
+    line1 = re.search(r"📌[^\n]*", raw_content)
+    line2 = re.search(r"📋[^\n]*", raw_content)
+    if line1 and line2:
+        return f"{line1.group(0).strip()}\n{line2.group(0).strip()}"
+
+    # 이모지 없이 "지원규모"/"필수서류" 라벨만 있는 경우도 최대한 구제
+    alt1 = re.search(r"(지원\s*규모\s*[:：][^\n]*)", raw_content)
+    alt2 = re.search(r"(필수\s*서류\s*[:：][^\n]*)", raw_content)
+    if alt1 and alt2:
+        return f"📌 {alt1.group(1).strip()}\n📋 {alt2.group(1).strip()}"
+
+    return None
+
+
 def summarize_with_openrouter(title, body_text):
     """
     원문에서 [지원규모]와 [필수서류]를 한국어 두 줄로 요약.
-    API 키가 없거나 호출 실패 시, 안전한 대체 문구를 반환합니다.
+    AI 호출이 불가능하거나 실패하면, 정규식/키워드로 뽑아낸 결정론적
+    단서(deterministic_summary_hints)를 활용한 대체 문구를 반환합니다.
     """
-    fallback = (
-        "📌 지원규모: 원문 확인이 필요합니다 (본문 추출/요약 실패).\n"
-        "📋 필수서류: 공고 원문의 신청 서류 안내를 확인해 주세요."
-    )
+    budget_hint, docs_hint = deterministic_summary_hints(body_text)
+
+    def build_fallback():
+        if budget_hint:
+            budget_line = f"📌 지원규모: {budget_hint} (문서에서 자동 감지, 정확한 금액은 원문 확인 권장)"
+        else:
+            budget_line = "📌 지원규모: 원문에서 특정하지 못했습니다. 첨부파일 확인이 필요합니다."
+        if docs_hint:
+            docs_line = f"📋 필수서류: {docs_hint} (문서에서 자동 감지, 최신 공고문 기준 확인 권장)"
+        else:
+            docs_line = "📋 필수서류: 공고 원문의 신청 서류 안내를 확인해 주세요."
+        return f"{budget_line}\n{docs_line}"
+
+    fallback = build_fallback()
 
     if not OPENROUTER_API_KEY:
-        log("OPENROUTER_API_KEY(GEMINI_API_KEY) 미설정 - 요약을 건너뜁니다.")
+        log("OPENROUTER_API_KEY(GEMINI_API_KEY) 미설정 - AI 요약 없이 자동 감지 결과만 사용합니다.")
         return fallback
 
     if not body_text or len(body_text.strip()) < 10:
         return fallback
 
+    # 원문 전체를 넘기는 대신, 지원규모/필수서류 관련 구절만 검색해서 넘김
+    # (경량 RAG) -> 프롬프트가 작아지고 모델이 헤맬 필요가 없어짐
+    relevant_context = extract_relevant_context(body_text)
+    if not relevant_context.strip():
+        return fallback
+
+    hint_lines = []
+    if budget_hint:
+        hint_lines.append(f"- 문서에서 자동 감지된 금액/인원 표현: {budget_hint}")
+    if docs_hint:
+        hint_lines.append(f"- 문서에서 자동 감지된 서류명: {docs_hint}")
+    hint_block = ("\n[참고용 자동 감지 단서 - 그대로 베끼지 말고 자연스럽게 반영]\n"
+                  + "\n".join(hint_lines)) if hint_lines else ""
+
     prompt = (
-        "다음은 정부/공공기관 지원사업 공고 원문입니다. "
-        "이 내용을 바탕으로 정확히 아래 두 줄 형식으로만 한국어로 요약해줘. "
-        "형식 이외의 다른 설명은 절대 추가하지 마.\n\n"
+        "다음은 정부/공공기관 지원사업 공고 원문에서 관련 부분만 발췌한 것입니다 "
+        "(중간 생략은 [...]로 표시됨). "
+        "이 내용을 바탕으로 정확히 아래 두 줄 형식으로만 한국어로 답하세요. "
+        "다른 언어, 설명, 태그, 메타 정보는 절대 포함하지 말고 이 두 줄만 출력하세요. "
+        "발췌문에 없는 내용은 추측하지 말고 '확인 필요'라고 쓰세요.\n\n"
         "📌 지원규모: (한 문장)\n"
         "📋 필수서류: (한 문장, 쉼표로 나열 가능)\n\n"
         f"[공고 제목]\n{title}\n\n"
-        f"[공고 원문 일부]\n{body_text[:3000]}"
+        f"[관련 발췌 부분]\n{relevant_context}"
+        f"{hint_block}"
     )
 
     headers = {
@@ -586,8 +859,14 @@ def summarize_with_openrouter(title, body_text):
     payload = {
         "model": OPENROUTER_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 300,
-        "temperature": 0.3,
+        # 추론(reasoning) 토큰도 max_tokens 예산에서 차감되므로 충분히 크게 잡음.
+        # (reasoning.max_tokens보다 반드시 커야 답변 쓸 공간이 남음)
+        "max_tokens": 1500,
+        "temperature": 0.2,
+        # exclude=True는 "추론 내용을 숨기는" 것일 뿐 추론 자체를 막지 않으므로,
+        # 추론에 쓸 토큰 자체를 낮게 캡해서 답변용 예산을 확보합니다.
+        # (일부 모델은 이 옵션을 무시하고 자체 판단으로 추론량을 정할 수 있음)
+        "reasoning": {"max_tokens": 300, "exclude": True},
     }
 
     for attempt in range(1, 4):
@@ -602,10 +881,46 @@ def summarize_with_openrouter(title, body_text):
                     f"HTTP {resp.status_code} - {resp.text[:300]}"
                 )
                 resp.raise_for_status()
+
             data = resp.json()
-            content = data["choices"][0]["message"]["content"].strip()
-            if content:
-                return content
+
+            if "error" in data:
+                log(f"OpenRouter 요약 실패(시도 {attempt}): API 에러 - {data['error']}")
+                time.sleep(2 * attempt)
+                continue
+
+            choices = data.get("choices") or []
+            if not choices:
+                log(f"OpenRouter 요약 실패(시도 {attempt}): choices가 비어있음 - {str(data)[:300]}")
+                time.sleep(2 * attempt)
+                continue
+
+            message = choices[0].get("message") or {}
+            content = message.get("content")
+
+            # 일부 모델은 content 대신 reasoning 필드에만 텍스트를 채우는 경우가 있음
+            if not content:
+                content = message.get("reasoning")
+
+            if not content or not str(content).strip():
+                finish_reason = choices[0].get("finish_reason")
+                log(
+                    f"OpenRouter 요약 실패(시도 {attempt}): "
+                    f"content가 비어있음 (finish_reason={finish_reason}) - "
+                    f"message keys: {list(message.keys())}"
+                )
+                time.sleep(2 * attempt)
+                continue
+
+            cleaned = _clean_summary_output(str(content))
+            if cleaned:
+                return cleaned
+
+            log(
+                f"OpenRouter 요약 실패(시도 {attempt}): "
+                f"응답에서 두 줄 형식을 찾지 못함 - 원본 일부: {str(content)[:200]!r}"
+            )
+            time.sleep(2 * attempt)
         except Exception as e:
             log(f"OpenRouter 요약 실패(시도 {attempt}): {e}")
             time.sleep(2 * attempt)
@@ -616,17 +931,74 @@ def summarize_with_openrouter(title, body_text):
 # =========================================================
 # 7. HTML 뉴스레터 생성
 # =========================================================
+def build_xlsx_base64(items_data):
+    """
+    전체 수집 데이터를 실제 엑셀(.xlsx) 파일로 만들어 Base64 인코딩합니다.
+    openpyxl이 없으면 None을 반환하며, 호출부에서 CSV로 폴백합니다.
+    """
+    if not openpyxl:
+        return None
+
+    headers = [
+        "제목", "소관기관", "등록일", "신청기간", "요약",
+        "담당 이메일", "담당 전화번호", "첨부파일명", "원문링크", "유사공고 통합건수",
+    ]
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "기업마당 신규공고"
+    ws.append(headers)
+
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="111827", end_color="111827", fill_type="solid")
+    for col_idx in range(1, len(headers) + 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(vertical="center", wrap_text=True)
+
+    for row in items_data:
+        ws.append([
+            row.get("제목", ""),
+            row.get("소관기관", ""),
+            row.get("등록일", ""),
+            row.get("신청기간", ""),
+            row.get("요약", ""),
+            row.get("담당 이메일", ""),
+            row.get("담당 전화번호", ""),
+            row.get("첨부파일명", ""),
+            row.get("원문링크", ""),
+            row.get("_dup_count", 1),
+        ])
+
+    widths = [38, 16, 12, 20, 55, 24, 16, 30, 40, 10]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+
+    for row_cells in ws.iter_rows(min_row=2):
+        for cell in row_cells:
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+
+    ws.freeze_panes = "A2"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
 def build_csv_base64(items_data):
-    """전체 수집 데이터를 CSV로 만들고 Base64 인코딩."""
+    """전체 수집 데이터를 CSV로 만들고 Base64 인코딩 (openpyxl 없을 때의 폴백용)."""
     output = io.StringIO()
     fieldnames = [
         "제목", "소관기관", "등록일", "신청기간", "요약",
-        "담당 이메일", "담당 전화번호", "첨부파일명", "원문링크",
+        "담당 이메일", "담당 전화번호", "첨부파일명", "원문링크", "유사공고 통합건수",
     ]
-    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
     writer.writeheader()
     for row in items_data:
-        writer.writerow(row)
+        out_row = dict(row)
+        out_row["유사공고 통합건수"] = row.get("_dup_count", 1)
+        writer.writerow(out_row)
 
     csv_bytes = output.getvalue().encode("utf-8-sig")  # 엑셀 한글 깨짐 방지 BOM
     b64 = base64.b64encode(csv_bytes).decode("ascii")
@@ -634,8 +1006,20 @@ def build_csv_base64(items_data):
 
 
 def build_html_newsletter(items_data, target_date):
-    csv_b64 = build_csv_base64(items_data)
-    filename = f"bizinfo_{target_date.strftime('%Y%m%d')}.csv"
+    xlsx_b64 = build_xlsx_base64(items_data)
+    if xlsx_b64:
+        download_filename = f"bizinfo_{target_date.strftime('%Y%m%d')}.xlsx"
+        download_href = (
+            "data:application/vnd.openxmlformats-officedocument"
+            f".spreadsheetml.sheet;base64,{xlsx_b64}"
+        )
+        download_label = "📥 전체 데이터 엑셀(xlsx) 다운로드"
+    else:
+        # openpyxl이 없는 환경을 위한 안전한 폴백
+        csv_b64 = build_csv_base64(items_data)
+        download_filename = f"bizinfo_{target_date.strftime('%Y%m%d')}.csv"
+        download_href = f"data:text/csv;base64,{csv_b64}"
+        download_label = "📥 전체 데이터 CSV 다운로드 (엑셀에서 열기 가능)"
 
     cards_html = ""
     for row in items_data:
@@ -643,22 +1027,37 @@ def build_html_newsletter(items_data, target_date):
         agency = row["소관기관"]
         period = row["신청기간"]
         summary_html = row["요약"].replace("\n", "<br>")
-        email = row["담당 이메일"]
+        email = (row["담당 이메일"] or "").strip()
         phone = row["담당 전화번호"]
         link = row["원문링크"] or "#"
+        dup_count = row.get("_dup_count", 1)
 
-        mailto_btn = ""
-        if email:
-            subject = requests.utils.quote(f"[지원사업 문의] {title}")
-            body = requests.utils.quote(
-                f"안녕하세요, '{title}' 공고 관련 문의드립니다.\n\n"
-                f"- 문의 내용:\n"
+        dup_badge = ""
+        if dup_count > 1:
+            dup_badge = (
+                f'<span style="display:inline-block;margin-left:6px;padding:1px 8px;'
+                f'background:#fef3c7;color:#92400e;border-radius:10px;font-size:11px;">'
+                f'유사 공고 {dup_count}건 통합됨</span>'
             )
-            mailto_btn = (
+
+        propose_btn = ""
+        # 받는사람에는 순수 이메일 주소만 들어가도록 재검증 후 사용
+        if email and EMAIL_RE.fullmatch(email):
+            subject = urlquote(f"[지원사업 공고 자동화 서비스 제안] {title}")
+            body = urlquote(
+                "안녕하세요, 담당자님.\n\n"
+                f"'{title}' 공고를 보고 연락드립니다.\n"
+                "저희는 기업마당에 등록되는 지원사업 공고를 자동으로 수집·분석해서 "
+                "신청 기업에게 보기 쉽게 전달하는 원클릭 서비스를 제공하고 있습니다.\n"
+                "귀 기관의 공고 홍보/안내 업무에도 도움이 될 수 있을 것 같아 이렇게 제안드립니다.\n\n"
+                "(구체적인 제안 내용은 이어서 작성하겠습니다.)\n\n"
+                "감사합니다.\n"
+            )
+            propose_btn = (
                 f'<a href="mailto:{email}?subject={subject}&body={body}" '
                 f'style="display:inline-block;margin-top:8px;padding:6px 14px;'
                 f'background:#2563eb;color:#fff;border-radius:6px;'
-                f'text-decoration:none;font-size:13px;">✉️ 원클릭 메일 문의</a>'
+                f'text-decoration:none;font-size:13px;">📩 원클릭 서비스 제안</a>'
             )
 
         cards_html += f"""
@@ -666,7 +1065,7 @@ def build_html_newsletter(items_data, target_date):
                     margin-bottom:14px;background:#ffffff;
                     box-shadow:0 1px 3px rgba(0,0,0,0.05);">
           <div style="font-size:15px;font-weight:700;color:#111827;margin-bottom:4px;">
-            {title}
+            {title}{dup_badge}
           </div>
           <div style="font-size:12.5px;color:#6b7280;margin-bottom:10px;">
             🏢 {agency} &nbsp;|&nbsp; 📅 신청기간: {period}
@@ -683,7 +1082,7 @@ def build_html_newsletter(items_data, target_date):
           <div style="margin-top:6px;">
             <a href="{link}" style="font-size:12.5px;color:#2563eb;text-decoration:none;
                       margin-right:10px;">🔗 원문 바로가기</a>
-            {mailto_btn}
+            {propose_btn}
           </div>
         </div>
         """
@@ -703,12 +1102,12 @@ def build_html_newsletter(items_data, target_date):
         {cards_html if items_data else '<div style="text-align:center;color:#6b7280;padding:40px 0;">오늘 등록된 신규 공고가 없습니다.</div>'}
 
         <div style="text-align:center;margin-top:20px;">
-          <a download="{filename}"
-             href="data:text/csv;base64,{csv_b64}"
+          <a download="{download_filename}"
+             href="{download_href}"
              style="display:inline-block;padding:10px 20px;background:#111827;
                     color:#fff;border-radius:8px;text-decoration:none;
                     font-size:13.5px;">
-            📥 전체 데이터 엑셀(CSV) 다운로드
+            {download_label}
           </a>
         </div>
 
@@ -845,6 +1244,9 @@ def main():
 
         summary = summarize_with_openrouter(title, body_text)
 
+        # 유사/중복 공고 판별에 쓸 비교용 텍스트 (제목 유사도와 함께 사용)
+        compare_text = extract_relevant_context(body_text) or body_text[:1500]
+
         items_data.append({
             "제목": title,
             "소관기관": agency,
@@ -855,7 +1257,13 @@ def main():
             "담당 전화번호": phone,
             "첨부파일명": attachment_name or "",
             "원문링크": link,
+            "_compare_text": compare_text,
         })
+
+    before_count = len(items_data)
+    items_data = deduplicate_items(items_data)
+    if len(items_data) != before_count:
+        log(f"유사 공고 통합 결과: {before_count}건 -> {len(items_data)}건")
 
     html_body = build_html_newsletter(items_data, target_date)
     subject = f"[기업마당 신규공고] {target_date.strftime('%Y-%m-%d')} 등록 {len(items_data)}건"
