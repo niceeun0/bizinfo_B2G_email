@@ -52,7 +52,10 @@ jobs:
           MAIL_RECEIVER: ${{ secrets.MAIL_RECEIVER }}
           # 실제로는 OpenRouter API 키를 이 시크릿에 등록합니다.
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          OPENROUTER_MODEL: "meta-llama/llama-3.1-8b-instruct:free"
+          # openrouter/free = OpenRouter 공식 "Free Models Router" 슬러그.
+          # 개별 무료 모델(예: xxx:free)은 자주 폐기/변경되어 404가 나기 쉬우므로
+          # 이 라우터 슬러그 사용을 권장합니다.
+          OPENROUTER_MODEL: "openrouter/free"
         run: |
           python bizinfo_bot.py
 
