@@ -1236,7 +1236,7 @@ def build_html_newsletter(items_data, target_date, attachment_filename=None):
     <html>
     <head><meta charset="utf-8"></head>
     <body style="margin:0;padding:0;background:#f3f4f6;font-family:'Apple SD Gothic Neo','Malgun Gothic',sans-serif;">
-      <div style="max-width:1080px;margin:0 auto;padding:28px 24px;">
+      <div style="max-width:1920px;margin:0 auto;padding:28px 24px;">
         <div style="text-align:center;margin-bottom:22px;">
           <h2 style="color:#111827;margin:0 0 6px 0;font-size:22px;">📢 기업마당 신규 지원사업 뉴스레터</h2>
           <div style="color:#6b7280;font-size:13.5px;">
