@@ -37,33 +37,29 @@ PHONE_PATTERN = re.compile(r"0\d{1,2}-\d{3,4}-\d{4}")
 def fetch_bizinfo_notices():
     target_url = f"{BIZINFO_API_URL}?crtfcKey={CRTFC_KEY}&dataType=json&searchCnt=100"
     
-    ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
-
-    req = urllib.request.Request(
-        target_url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
-            "Accept": "application/json"
-        }
-    )
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+        "Accept": "application/json"
+    }
 
     max_retries = 3
     for attempt in range(1, max_retries + 1):
         try:
-            print(f"⏳ [수집 시도 {attempt}/{max_retries}] 기업마당 API 호출 중...")
-            with urllib.request.urlopen(req, context=ctx, timeout=30) as response:
-                if response.status == 200:
-                    res_body = response.read().decode('utf-8')
-                    data = json.loads(res_body)
-                    items = data.get("jsonArray") or data.get("item") or data.get("items") or []
-                    print(f"🎯 [수집 성공] 총 {len(items)}건의 공고를 불러왔습니다.")
-                    return items
+            print(f"⏳ [수집 시도 {attempt}/{max_retries}] 기업마당 API 호출 중 (requests 방식)...")
+            # urllib 대신 requests를 사용하고 타임아웃을 40초로 설정
+            res = requests.get(target_url, headers=headers, timeout=40, verify=False)
+            
+            if res.status_code == 200:
+                data = res.json()
+                items = data.get("jsonArray") or data.get("item") or data.get("items") or []
+                print(f"🎯 [수집 성공] 총 {len(items)}건의 공고를 불러왔습니다.")
+                return items
+            else:
+                print(f"⚠️ [API 응답 코드 이상]: {res.status_code}")
         except Exception as e:
             print(f"⚠️ [연결 경고 (시도 {attempt})]: {str(e)}")
             if attempt < max_retries:
-                time.sleep(3)
+                time.sleep(5)
             else:
                 print("❌ [최종 실패] API 연결에 실패했습니다.")
     return []
