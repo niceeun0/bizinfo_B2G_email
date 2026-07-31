@@ -492,10 +492,18 @@ def extract_text_from_pdf(raw_bytes):
     with open(tmp_path, "wb") as f:
         f.write(raw_bytes)
     try:
-        with pdfplumber.open(tmp_path) as pdf:
-            for page in pdf.pages:
-                t = page.extract_text() or ""
-                text_parts.append(t)
+        try:
+            with pdfplumber.open(tmp_path) as pdf:
+                for page in pdf.pages:
+                    t = page.extract_text() or ""
+                    text_parts.append(t)
+        except Exception as e:
+            # 손상되었거나 잘린 PDF(다운로드 실패 등)는 파싱 자체가 예외를
+            # 던질 수 있음. 여기서 잡지 않으면 이 공고 하나 때문에 스크립트
+            # 전체가 죽어서 그날 뉴스레터가 통째로 발송되지 않게 됨.
+            log(f"PDF 파싱 실패(손상되었거나 잘린 파일일 수 있음): {e}")
+            return ""
+
         text = "\n".join(text_parts).strip()
 
         # 텍스트가 거의 없으면(스캔본 PDF) OCR 시도
@@ -1371,7 +1379,9 @@ def main():
     new_items = filter_new_items(raw_items, target_date)
 
     items_data = []
-    for idx, item in enumerate(new_items, start=1):
+
+    def process_single_item(item):
+        """공고 1건을 처리해서 items_data용 row 딕셔너리를 반환. 실패 시 예외를 던짐."""
         title = item.get("pblancNm") or item.get("bsnsNm") or "(제목 없음)"
         org_exc = item.get("excInsttNm") or "-"
         period = item.get("reqstBeginEndDe") or item.get("pblancEndDe") or "-"
@@ -1379,8 +1389,6 @@ def main():
         reqst_mth = strip_html(item.get("reqstMthPapersCn") or "") or "-"
         refrnc_nm = strip_html(item.get("refrncNm") or "")
         trget_nm = item.get("trgetNm") or "-"
-
-        log(f"[{idx}/{len(new_items)}] 처리 중: {title}")
 
         attachment_url, attachment_name = extract_attachment_url(item)
         body_text = ""
@@ -1431,6 +1439,45 @@ def main():
             "_budget_won": parse_won_amount(budget),
         }
         row.update(doc_flags)  # 카탈로그별 Y/N 컬럼 추가
+        return row
+
+    def fallback_row(item, error):
+        """공고 처리 중 예외가 났을 때, 공고 자체는 누락시키지 않고
+        최소 정보(제목/기관/원문링크)만 담은 대체 행을 만듭니다."""
+        row = {
+            "제목": item.get("pblancNm") or item.get("bsnsNm") or "(제목 없음)",
+            "수행기관명": item.get("excInsttNm") or "-",
+            "신청기간": item.get("reqstBeginEndDe") or item.get("pblancEndDe") or "-",
+            "신청방법": "-",
+            "지원규모": f"자동 처리 중 오류 발생 - 원문을 직접 확인해 주세요 ({error})",
+            "문의처": "-",
+            "담당 이메일": "",
+            "담당 전화번호": "",
+            "지원대상": "-",
+            "기타서류": "",
+            "원문링크": item.get("pblancUrl") or item.get("rceptEngnHmpgUrl") or "",
+            "_compare_text": "",
+            "_match_count": 0,
+            "_budget_won": 0,
+        }
+        for label, _ in ONECLICK_DOC_CATALOG:
+            row[label] = "N"
+        return row
+
+    for idx, item in enumerate(new_items, start=1):
+        title_preview = item.get("pblancNm") or item.get("bsnsNm") or "(제목 없음)"
+        log(f"[{idx}/{len(new_items)}] 처리 중: {title_preview}")
+
+        # 공고 1건 처리 중 어떤 예외가 나더라도(손상된 첨부파일, 파싱 오류 등)
+        # 이 공고만 건너뛰고 전체 배치는 계속 진행합니다. 여기서 잡지 않으면
+        # 59건 중 1건만 실패해도 그날 뉴스레터 전체가 발송되지 않습니다.
+        try:
+            row = process_single_item(item)
+        except Exception as e:
+            log(f"  [경고] 이 공고 처리 중 예외 발생 - 건너뛰고 계속 진행합니다: {e}")
+            traceback.print_exc()
+            row = fallback_row(item, e)
+
         items_data.append(row)
 
     before_count = len(items_data)
