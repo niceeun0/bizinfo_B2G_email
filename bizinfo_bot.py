@@ -109,7 +109,12 @@ OPENROUTER_MODEL = os.environ.get("OPENROUTER_MODEL", "openrouter/free")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 REQUEST_TIMEOUT = 20
-MAX_RETRY = 5
+# 같은 GitHub Actions Job 안에서는 출발지 IP가 바뀌지 않으므로, 서버가
+# 그 IP 대역 자체를 차단한 경우 재시도를 아무리 반복해도 결과가 같습니다.
+# (KR_PROXY_URL이 설정되어 있으면 그쪽을 우선 시도하므로 이 값과 무관하게
+# 프록시 경로가 성공할 수 있습니다.) 예전엔 5회였는데, 실패가 반복 확인된
+# 뒤로는 CI 실행 시간 낭비를 줄이기 위해 기본값을 낮췄습니다.
+MAX_RETRY = int(os.environ.get("MAX_RETRY", "3"))
 BACKOFF_BASE = 3  # seconds
 
 # 국내(한국) 소재 프록시 서버 주소 (예: http://user:pass@1.2.3.4:8080).
@@ -265,10 +270,13 @@ def fetch_with_retry(url):
 
     if not KR_PROXY_URL:
         log(
-            "[진단] 모든 방식이 '연결 타임아웃'으로 실패했다면 이는 DNS 문제가 아니라 "
-            "서버(또는 방화벽)가 이 요청의 출발지 IP 대역 자체를 차단하고 있다는 뜻입니다. "
-            "이 경우 DNS 우회 트릭으로는 해결되지 않으며, KR_PROXY_URL 환경변수에 국내 "
-            "소재 프록시 서버를 등록해야 합니다."
+            "[진단] 모든 방식이 '연결 타임아웃'(연결 거부가 아님)으로 실패했습니다. "
+            "이는 DNS 문제가 아니라 서버 또는 중간 방화벽이 이 요청의 출발지 IP "
+            "대역 자체를 막고 있다는 뜻입니다. 같은 Job 안에서는 출발지 IP가 "
+            "바뀌지 않으므로 재시도를 더 반복해도 결과는 같습니다. "
+            "이 실패가 반복된다면(한 번의 우연한 타이밍이 아니라면), "
+            "KR_PROXY_URL 환경변수(시크릿)에 국내(한국) 소재 프록시 서버 주소를 "
+            "등록해야 합니다. 아직 등록하지 않았다면 지금이 등록할 시점입니다."
         )
 
     raise RuntimeError(f"모든 재시도 실패. 마지막 에러: {last_err}")
@@ -1244,7 +1252,7 @@ def build_html_newsletter(items_data, target_date, attachment_filename=None):
     <html>
     <head><meta charset="utf-8"></head>
     <body style="margin:0;padding:0;background:#f3f4f6;font-family:'Apple SD Gothic Neo','Malgun Gothic',sans-serif;">
-      <div style="max-width:1920px;margin:0 auto;padding:28px 24px;">
+      <div style="max-width:1080px;margin:0 auto;padding:28px 24px;">
         <div style="text-align:center;margin-bottom:22px;">
           <h2 style="color:#111827;margin:0 0 6px 0;font-size:22px;">📢 기업마당 신규 지원사업 뉴스레터</h2>
           <div style="color:#6b7280;font-size:13.5px;">
